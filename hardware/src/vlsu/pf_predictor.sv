@@ -97,25 +97,25 @@ module pf_predictor import pf_pkg::*; #(
   assign predicted_size_o       = pending_size_q;
   assign predicted_is_strided_o = pending_is_strided_q;
 
-  // Confidence FSM (see header comment). has_prev_pred_q distinguishes
-  // "never predicted anything yet" (first prefetchable instruction ever
-  // seen: nothing to compare against, must not read as a mispredict) from
-  // "predicted last time, now checking it".
+  // Confidence FSM (see header comment). Reuses last_id_valid_q -- already
+  // "have we fired at least one prediction before" by construction, since
+  // it is set the same cycle and by the same new_insn condition that
+  // latches pending_addr_q -- rather than keeping a second register that
+  // would only ever equal it.
   pf_confidence_e conf_q;
-  logic           has_prev_pred_q;
 
   logic was_correct;
-  assign was_correct = has_prev_pred_q && (addr_t'(pe_req_i.scalar_op) == pending_addr_q);
+  assign was_correct = last_id_valid_q && (addr_t'(pe_req_i.scalar_op) == pending_addr_q);
 
   logic mispredict;
-  assign mispredict   = new_insn && has_prev_pred_q && !was_correct;
+  assign mispredict   = new_insn && last_id_valid_q && !was_correct;
   assign mispredict_o = mispredict;
 
   pf_confidence_e conf_d;
   always_comb begin
     conf_d = conf_q;
     if (new_insn) begin
-      if (!has_prev_pred_q) begin
+      if (!last_id_valid_q) begin
         conf_d = PF_CONF_NO_PRED;
       end else if (was_correct) begin
         unique case (conf_q)
@@ -139,7 +139,6 @@ module pf_predictor import pf_pkg::*; #(
       pending_size_q        <= '0;
       pending_is_strided_q  <= 1'b0;
       conf_q                <= PF_CONF_NO_PRED;
-      has_prev_pred_q       <= 1'b0;
     end else begin
       if (new_insn) begin
         last_id_q            <= pe_req_i.id;
@@ -152,7 +151,6 @@ module pf_predictor import pf_pkg::*; #(
         pending_is_strided_q  <= is_strided_i;
         pending_valid_q       <= (conf_d != PF_CONF_NO_PRED);
         conf_q                <= conf_d;
-        has_prev_pred_q       <= 1'b1;
       end else if (pending_valid_q && predict_ready_i) begin
         pending_valid_q <= 1'b0;
       end

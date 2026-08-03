@@ -6,9 +6,9 @@
 // release is "one issued AR", and beat ordering within a real burst is
 // already guaranteed by AXI itself.
 //
-// Phase 2b: data buffer lookups can now hit, keyed on {addr, size} (not
-// addr alone -- see pf_data_buffer.sv). A hit is only ever recognized for
-// a single-beat (len=0) incoming AR -- a multi-beat unit-stride burst
+// Data buffer lookups are keyed on {addr, size} (not addr alone -- see
+// pf_data_buffer.sv). A hit is only ever recognized for a single-beat
+// (len=0) incoming AR -- a multi-beat unit-stride burst
 // always takes the miss path even if its first beat's address+size match
 // a cached entry, since the buffer only ever caches one beat per entry.
 // On a hit, the slot is filled immediately from the buffer and never
@@ -71,7 +71,7 @@ module pf_rob import pf_pkg::*; #(
     output addr_t           lookup_addr_o,
     output size_t           lookup_size_o,
     input  pf_entry_state_e lookup_state_i,
-    input  axi_r_t           lookup_data_i
+    input  axi_r_t          lookup_data_i
   );
 
   // One slot per outstanding AR. beats_left counts AXI beats still owed;
@@ -89,7 +89,7 @@ module pf_rob import pf_pkg::*; #(
   localparam logic [BeatCntWidth-1:0] OneBeat = BeatCntWidth'(1);
 
   logic rob_full;
-  assign rob_full = (count_q == Depth);
+  assign rob_full = (count_q == CountWidth'(Depth));
 
   assign lookup_valid_o = axi_ar_valid_i;
   assign lookup_addr_o  = addr_t'(axi_ar_i.addr);

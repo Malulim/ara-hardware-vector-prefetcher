@@ -7,11 +7,11 @@
 // RESP_OKAY, fills the data buffer. A non-OKAY response (SLVERR/DECERR/
 // EXOKAY) still pops the tracker -- it must, or the tracker desyncs from
 // future predictive completions -- but is otherwise discarded: caching it
-// would let corrupt data masquerade as a hit on a later real access. This
-// check did not exist in the original Phase 2 milestone; vldu's own real
-// path has never checked r_resp (it trusts the bus), but a prefetch result
-// sitting in the buffer for an arbitrary number of cycles before anyone
-// asks for it is a different risk profile and gets checked here.
+// would let corrupt data masquerade as a hit on a later real access.
+// vldu's own real path has never checked r_resp (it trusts the bus), but
+// a prefetch result sitting in the buffer for an arbitrary number of
+// cycles before anyone asks for it is a different risk profile and gets
+// checked here.
 //
 // A predictive beat is always single-beat (Sec. pf_rob.sv only ever issues
 // len=0 predictive ARs), so every one accepted here is an immediate,

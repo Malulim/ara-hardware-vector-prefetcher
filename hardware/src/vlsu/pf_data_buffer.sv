@@ -6,8 +6,9 @@
 // it reports EMPTY, the same as an address that was never requested, and
 // falls through the existing miss path with no extra branch. Counting how
 // many predictive ARs are outstanding (for throttling) is a separate,
-// address-agnostic concern that belongs in its own counter, not in this
-// state machine -- see pf_predictor.sv / the throttle stage above it.
+// address-agnostic concern that does not belong in this state machine --
+// see pf_throttle.sv, which gets this for free from pred_addr_fifo's own
+// full_o rather than keeping a second, redundant counter.
 //
 // Entry is {addr, size, data, state}, not just {addr, data, state}: a hit
 // requires addr == query_addr AND size == query_size. Address-only
@@ -82,7 +83,6 @@ module pf_data_buffer import pf_pkg::*; #(
       state_q       <= '0;
       replace_ptr_q <= '0;
     end else begin
-      replace_ptr_q <= replace_ptr_q;
       if (fill_valid_i) begin
         state_q[replace_ptr_q] <= PF_ENTRY_VALID;
         addr_q[replace_ptr_q]  <= fill_addr_i;
