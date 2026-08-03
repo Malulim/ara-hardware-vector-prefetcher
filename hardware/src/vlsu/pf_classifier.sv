@@ -11,6 +11,11 @@
 // at different element widths must not be allowed to alias one another.
 // size is computed independently of byte_stride_o so a bug in the stride
 // arithmetic can never masquerade as a size bug or vice versa.
+//
+// is_strided_o: the one extra bit throttle (Sec. 5.3) needs to enforce the
+// v1 scope decision (Sec. 10.1) -- only VLSE predictions become real
+// predictive ARs, VLE stays observe-only. Decoded here (not re-derived
+// downstream) for the same single-source-of-truth reason as size_o.
 
 module pf_classifier import ara_pkg::*; #(
     parameter type pe_req_t = logic,
@@ -20,13 +25,15 @@ module pf_classifier import ara_pkg::*; #(
     input  pe_req_t pe_req_i,
     output logic    prefetchable_o,
     output stride_t byte_stride_o,
-    output size_t   size_o
+    output size_t   size_o,
+    output logic    is_strided_o
   );
 
   always_comb begin
     prefetchable_o = 1'b0;
     byte_stride_o  = '0;
     size_o         = '0;
+    is_strided_o   = 1'b0;
 
     case (pe_req_i.op)
       VLE: begin
@@ -38,6 +45,7 @@ module pf_classifier import ara_pkg::*; #(
         prefetchable_o = 1'b1;
         byte_stride_o  = stride_t'(pe_req_i.stride);
         size_o         = size_t'(pe_req_i.vtype.vsew);
+        is_strided_o   = 1'b1;
       end
       default: ; // VLXE/VSXE, segment ops, all stores: never prefetched
     endcase

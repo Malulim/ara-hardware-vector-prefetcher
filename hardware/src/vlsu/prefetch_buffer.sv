@@ -2,13 +2,17 @@
 // Sits on Ara's AR/R load path, between the address generator and the AXI
 // cut. Pure module-to-module wiring, no decision logic of its own (Sec.
 // "文件拆分" of the prefetcher design) -- the actual behavior lives in
-// pf_classifier.sv, pf_predictor.sv, pf_addr_fifo.sv, pf_rob.sv,
-// pf_r_router.sv and pf_data_buffer.sv.
+// pf_classifier.sv, pf_predictor.sv, pf_throttle.sv, pf_addr_fifo.sv,
+// pf_rob.sv, pf_r_router.sv and pf_data_buffer.sv.
 //
-// Phase 2b: classifier + predictor fire unconditionally (no confidence FSM
-// yet) for every VLE/VLSE instruction observed on pe_req_i, which is wired
-// in separately from (not derived from) the AR/R traffic below -- stride/
-// EEW/vl live only in the instruction, never on the AXI channels. A hit is
+// classifier + predictor run for every VLE/VLSE instruction observed on
+// pe_req_i, which is wired in separately from (not derived from) the AR/R
+// traffic below -- stride/EEW/vl live only in the instruction, never on
+// the AXI channels. predictor's confidence FSM decides *whether* a given
+// instruction's prediction is trusted enough to offer downstream at all;
+// throttle then additionally only lets strided (VLSE) predictions become
+// real predictive ARs (Sec. 10.1) -- VLE still builds confidence-FSM
+// state for future reference but never reaches the AXI bus. A hit is
 // only ever recognized for a single-beat (len=0) request whose {addr,
 // size} both match a cached entry, since the buffer caches one beat per
 // entry. A predictive (id=1) completion is only cached if its r_resp is
@@ -64,16 +68,23 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     input  logic    axi_r_ready_i
   );
 
+  // Driven by predictor's mispredict_o below. Deliberately reaches only
+  // pf_addr_fifo and pf_data_buffer, not pf_rob -- see the mispredict_o
+  // port comment in pf_predictor.sv for why pf_rob must never be reset by
+  // a stride guess going wrong.
   logic flush;
-  assign flush = 1'b0; // Phase 4 adds mispredict flush; nothing drives it yet.
+  logic rob_flush;
+  assign rob_flush = 1'b0;
 
   // ---------------------------------------------------------------------
   // 5.1 / 5.2: classify + predict the next instruction's base address.
-  // size_o/predicted_size_o are forwarded end-to-end, never re-derived.
+  // size_o/predicted_size_o/is_strided are forwarded end-to-end, never
+  // re-derived.
   // ---------------------------------------------------------------------
   logic    prefetchable;
   stride_t byte_stride;
   size_t   classified_size;
+  logic    is_strided;
 
   pf_classifier #(
     .pe_req_t(pe_req_t),
@@ -83,12 +94,15 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .pe_req_i      (pe_req_i       ),
     .prefetchable_o(prefetchable   ),
     .byte_stride_o (byte_stride    ),
-    .size_o        (classified_size)
+    .size_o        (classified_size),
+    .is_strided_o  (is_strided     )
   );
 
   logic  predict_valid, predict_ready;
   addr_t predicted_addr;
   size_t predicted_size;
+  logic  predicted_is_strided;
+  logic  mispredict;
 
   pf_predictor #(
     .pe_req_t(pe_req_t),
@@ -97,17 +111,37 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .size_t  (size_t  ),
     .id_t    (id_t    )
   ) i_pf_predictor (
-    .clk_i           (clk_i          ),
-    .rst_ni          (rst_ni         ),
-    .pe_req_i        (pe_req_i       ),
-    .pe_req_valid_i  (pe_req_valid_i ),
-    .prefetchable_i  (prefetchable   ),
-    .byte_stride_i   (byte_stride    ),
-    .size_i          (classified_size),
-    .predict_valid_o (predict_valid  ),
-    .predict_ready_i (predict_ready  ),
-    .predicted_addr_o(predicted_addr ),
-    .predicted_size_o(predicted_size )
+    .clk_i                 (clk_i               ),
+    .rst_ni                (rst_ni              ),
+    .pe_req_i              (pe_req_i            ),
+    .pe_req_valid_i        (pe_req_valid_i      ),
+    .prefetchable_i        (prefetchable        ),
+    .byte_stride_i         (byte_stride         ),
+    .size_i                (classified_size     ),
+    .is_strided_i          (is_strided          ),
+    .predict_valid_o       (predict_valid       ),
+    .predict_ready_i       (predict_ready       ),
+    .predicted_addr_o      (predicted_addr      ),
+    .predicted_size_o      (predicted_size      ),
+    .predicted_is_strided_o(predicted_is_strided),
+    .mispredict_o          (mispredict          )
+  );
+
+  assign flush = mispredict;
+
+  // ---------------------------------------------------------------------
+  // 5.3: throttle. v1 scope -- only strided predictions ever become a
+  // real predictive AR (Sec. 10.1); the "distance N" / in-flight-cap M
+  // simplifications are documented in pf_throttle.sv's own header.
+  // ---------------------------------------------------------------------
+  logic pred_valid_gated, pred_ready_gated;
+
+  pf_throttle i_pf_throttle (
+    .predict_valid_i       (predict_valid       ),
+    .predicted_is_strided_i(predicted_is_strided),
+    .predict_valid_o       (pred_valid_gated    ),
+    .predict_ready_o       (predict_ready       ),
+    .predict_ready_i       (pred_ready_gated    )
   );
 
   // Package the predicted address into a real, single-beat AXI AR with
@@ -175,13 +209,13 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   ) i_pf_rob (
     .clk_i                (clk_i              ),
     .rst_ni               (rst_ni             ),
-    .flush_i              (flush              ),
+    .flush_i              (rob_flush          ),
     .axi_ar_i             (axi_ar_i           ),
     .axi_ar_valid_i       (axi_ar_valid_i     ),
     .axi_ar_ready_o       (axi_ar_ready_o     ),
     .pred_ar_i            (pred_ar            ),
-    .pred_ar_valid_i      (predict_valid      ),
-    .pred_ar_ready_o      (predict_ready      ),
+    .pred_ar_valid_i      (pred_valid_gated   ),
+    .pred_ar_ready_o      (pred_ready_gated   ),
     .pred_ar_fire_o       (pred_addr_fifo_push),
     .pred_addr_fifo_full_i(pred_addr_fifo_full),
     .axi_ar_o             (axi_ar_o           ),

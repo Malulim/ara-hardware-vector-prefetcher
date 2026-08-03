@@ -18,4 +18,16 @@ package pf_pkg;
     PF_ENTRY_VALID
   } pf_entry_state_e;
 
+  // Confidence FSM state (Sec. 5.2). NO_PRED: pattern not (yet, or no
+  // longer) trusted, predictor still tracks it but issues no predictive
+  // AR. TRANSIENT/STEADY: at least one confirmed-correct prediction in a
+  // row, predictive ARs are issued in both. A single mispredict drops
+  // straight back to NO_PRED from either TRANSIENT or STEADY -- not a
+  // gradual step-down -- see pf_predictor.sv.
+  typedef enum logic [1:0] {
+    PF_CONF_NO_PRED,
+    PF_CONF_TRANSIENT,
+    PF_CONF_STEADY
+  } pf_confidence_e;
+
 endpackage : pf_pkg
