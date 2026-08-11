@@ -43,7 +43,20 @@ module pf_data_buffer import pf_pkg::*; #(
     input  logic  fill_valid_i,
     input  addr_t fill_addr_i,
     input  size_t fill_size_i,
-    input  data_t fill_data_i
+    input  data_t fill_data_i,
+
+    // Coherency: a CVA6 store landed on [inval_addr_i, inval_addr_i +
+    // bytes(inval_len_i, inval_size_i)) -- clear every entry whose byte
+    // range overlaps it, mirroring axi_inval_filter.sv's ARA->CVA6
+    // direction but keyed on exact address-range overlap rather than
+    // cache-line/set-index, since this buffer is small and fully
+    // associative rather than a real cache (see pf_pkg::ranges_overlap).
+    // Takes priority over fill_valid_i landing on the same slot the same
+    // cycle -- see the always_ff below.
+    input  logic         inval_valid_i,
+    input  addr_t        inval_addr_i,
+    input  axi_pkg::len_t inval_len_i,
+    input  size_t         inval_size_i
   );
 
   addr_t           [Depth-1:0] addr_q;
@@ -59,6 +72,17 @@ module pf_data_buffer import pf_pkg::*; #(
     assign hit_match[i] = (state_q[i] == PF_ENTRY_VALID)
                             && (addr_q[i] == lookup_addr_i)
                             && (size_q[i] == lookup_size_i);
+  end
+
+  // One entry is always exactly one AXI beat (see header comment), so its
+  // byte range is [addr_q[i], addr_q[i] + 2^size_q[i]).
+  logic [Depth-1:0] inval_match;
+  for (genvar i = 0; i < Depth; i++) begin : g_inval
+    assign inval_match[i] = inval_valid_i && (state_q[i] == PF_ENTRY_VALID)
+                              && ranges_overlap(
+                                   64'(addr_q[i]), 64'd1 << size_q[i],
+                                   64'(inval_addr_i), (64'(inval_len_i) + 64'd1) << inval_size_i
+                                 );
   end
 
   always_comb begin
@@ -83,12 +107,19 @@ module pf_data_buffer import pf_pkg::*; #(
       state_q       <= '0;
       replace_ptr_q <= '0;
     end else begin
-      if (fill_valid_i) begin
+      // A store invalidating the very slot a fill would land in this
+      // cycle wins: dropping a predictive fetch is a missed prefetch
+      // opportunity (same risk class pf_r_router already accepts for a
+      // non-OKAY resp), caching it anyway would be a correctness bug.
+      if (fill_valid_i && !inval_match[replace_ptr_q]) begin
         state_q[replace_ptr_q] <= PF_ENTRY_VALID;
         addr_q[replace_ptr_q]  <= fill_addr_i;
         size_q[replace_ptr_q]  <= fill_size_i;
         data_q[replace_ptr_q]  <= fill_data_i;
         replace_ptr_q          <= replace_ptr_d;
+      end
+      for (int unsigned i = 0; i < Depth; i++) begin
+        if (inval_match[i]) state_q[i] <= PF_ENTRY_EMPTY;
       end
     end
   end

@@ -30,4 +30,21 @@ package pf_pkg;
     PF_CONF_STEADY
   } pf_confidence_e;
 
+  // Byte-range overlap test shared by pf_data_buffer.sv (invalidating
+  // cached entries) and pf_addr_fifo.sv (poisoning in-flight predictive
+  // fetches) when a CVA6 store lands on an address either of them is
+  // holding. Widened to 64 bits so callers can pass addr_t/size_t values
+  // of whatever width their AXI config uses without the caller having to
+  // reason about truncation -- same reasoning as pf_predictor.sv's
+  // predicted_addr_wide.
+  function automatic logic ranges_overlap(
+      logic [63:0] a_addr, logic [63:0] a_len,
+      logic [63:0] b_addr, logic [63:0] b_len
+    );
+    logic [63:0] a_end, b_end;
+    a_end = a_addr + a_len - 64'd1;
+    b_end = b_addr + b_len - 64'd1;
+    return (a_addr <= b_end) && (b_addr <= a_end);
+  endfunction
+
 endpackage : pf_pkg

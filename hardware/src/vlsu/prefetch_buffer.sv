@@ -65,7 +65,22 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     // R: to vldu
     output axi_r_t  axi_r_o,
     output logic    axi_r_valid_o,
-    input  logic    axi_r_ready_i
+    input  logic    axi_r_ready_i,
+
+    // Coherency: CVA6's own AW stream (snooped pre-mux in ara_system.sv,
+    // one pulse per accepted AW beat/burst -- see pf_data_buffer.sv and
+    // pf_addr_fifo.sv's inval_* ports for what each side does with it).
+    // The reverse direction of axi_inval_filter.sv (which watches ARA's
+    // AW to invalidate CVA6's L1 DCache); nothing upstream of Ara's own
+    // VLSU has an equivalent of CVA6's "stall issue while an accelerator
+    // store is pending" trick, so both the resident-data buffer and the
+    // in-flight address tracker need their own inval port -- see
+    // pf_addr_fifo.sv's header comment for the race that leaves open if
+    // only pf_data_buffer is covered.
+    input  logic          cva6_st_valid_i,
+    input  addr_t         cva6_st_addr_i,
+    input  axi_pkg::len_t cva6_st_len_i,
+    input  size_t         cva6_st_size_i
   );
 
   // Driven by predictor's mispredict_o below. Deliberately reaches only
@@ -166,23 +181,29 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   logic  pred_addr_fifo_full;
   addr_t pred_addr_fifo_addr_out;
   size_t pred_addr_fifo_size_out;
+  logic  pred_addr_fifo_poisoned;
 
   pf_addr_fifo #(
     .Depth (PredAddrFifoDepth),
     .addr_t(addr_t           ),
     .size_t(size_t           )
   ) i_pred_addr_fifo (
-    .clk_i       (clk_i                  ),
-    .rst_ni      (rst_ni                 ),
-    .flush_i     (flush                  ),
-    .push_valid_i(pred_addr_fifo_push    ),
-    .push_addr_i (predicted_addr         ),
-    .push_size_i (predicted_size         ),
-    .full_o      (pred_addr_fifo_full    ),
-    .pop_i       (pred_addr_fifo_pop     ),
-    .pop_addr_o  (pred_addr_fifo_addr_out),
-    .pop_size_o  (pred_addr_fifo_size_out),
-    .empty_o     (/* unused */          )
+    .clk_i         (clk_i                  ),
+    .rst_ni        (rst_ni                 ),
+    .flush_i       (flush                  ),
+    .push_valid_i  (pred_addr_fifo_push    ),
+    .push_addr_i   (predicted_addr         ),
+    .push_size_i   (predicted_size         ),
+    .full_o        (pred_addr_fifo_full    ),
+    .pop_i         (pred_addr_fifo_pop     ),
+    .pop_addr_o    (pred_addr_fifo_addr_out),
+    .pop_size_o    (pred_addr_fifo_size_out),
+    .pop_poisoned_o(pred_addr_fifo_poisoned),
+    .empty_o       (/* unused */          ),
+    .inval_valid_i (cva6_st_valid_i        ),
+    .inval_addr_i  (cva6_st_addr_i         ),
+    .inval_len_i   (cva6_st_len_i          ),
+    .inval_size_i  (cva6_st_size_i         )
   );
 
   // ---------------------------------------------------------------------
@@ -253,9 +274,10 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .real_r_o             (real_r                 ),
     .real_r_valid_o       (real_r_valid           ),
     .real_r_ready_i       (real_r_ready           ),
-    .pred_addr_fifo_pop_o (pred_addr_fifo_pop     ),
-    .pred_addr_fifo_addr_i(pred_addr_fifo_addr_out),
-    .pred_addr_fifo_size_i(pred_addr_fifo_size_out),
+    .pred_addr_fifo_pop_o     (pred_addr_fifo_pop     ),
+    .pred_addr_fifo_addr_i    (pred_addr_fifo_addr_out),
+    .pred_addr_fifo_size_i    (pred_addr_fifo_size_out),
+    .pred_addr_fifo_poisoned_i(pred_addr_fifo_poisoned),
     .fill_valid_o         (fill_valid             ),
     .fill_addr_o          (fill_addr              ),
     .fill_size_o          (fill_size              ),
@@ -282,7 +304,11 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .fill_valid_i  (fill_valid  ),
     .fill_addr_i   (fill_addr   ),
     .fill_size_i   (fill_size   ),
-    .fill_data_i   (fill_data   )
+    .fill_data_i   (fill_data   ),
+    .inval_valid_i (cva6_st_valid_i),
+    .inval_addr_i  (cva6_st_addr_i ),
+    .inval_len_i   (cva6_st_len_i  ),
+    .inval_size_i  (cva6_st_size_i )
   );
 
 endmodule : prefetch_buffer

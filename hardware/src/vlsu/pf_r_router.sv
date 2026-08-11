@@ -18,6 +18,11 @@
 // complete pop+fill decision -- there is no buffer-full backpressure to
 // apply on this side, since pf_data_buffer always has room via FIFO
 // replacement.
+//
+// pred_addr_fifo_poisoned_i: a CVA6 store landed on this address while the
+// fetch was still in flight (pf_addr_fifo.sv's content-addressable
+// invalidation -- see its header comment). Treated the same as a non-OKAY
+// resp: still pops the tracker, never fills the buffer.
 
 module pf_r_router import axi_pkg::RESP_OKAY; #(
     parameter type axi_r_t = logic,
@@ -41,6 +46,7 @@ module pf_r_router import axi_pkg::RESP_OKAY; #(
     output logic   pred_addr_fifo_pop_o,
     input  addr_t  pred_addr_fifo_addr_i,
     input  size_t  pred_addr_fifo_size_i,
+    input  logic   pred_addr_fifo_poisoned_i,
 
     // Fill the data buffer -- gated on RESP_OKAY.
     output logic   fill_valid_o,
@@ -62,7 +68,8 @@ module pf_r_router import axi_pkg::RESP_OKAY; #(
   // ARs (no lock semantics anywhere in addrgen), so a subordinate
   // returning EXOKAY here would itself be a protocol violation -- treat
   // it the same as SLVERR/DECERR and discard, rather than cache it.
-  assign fill_valid_o = r_valid_i && is_pred && (r_i.resp == RESP_OKAY);
+  assign fill_valid_o = r_valid_i && is_pred && (r_i.resp == RESP_OKAY)
+                          && !pred_addr_fifo_poisoned_i;
   assign fill_addr_o  = pred_addr_fifo_addr_i;
   assign fill_size_o  = pred_addr_fifo_size_i;
   assign fill_data_o  = r_i;

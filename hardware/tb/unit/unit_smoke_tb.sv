@@ -14,6 +14,13 @@
 // combinational or a thin wrapper around a proven common_cells FIFO; the
 // ROB+buffer pair is where an actual bug would hide).
 //
+// Also exercises pf_data_buffer.sv's inval_* port directly (step5): a
+// simulated CVA6 store overlapping a cached entry's address must clear it,
+// so a subsequent real AR to that address misses instead of hitting stale
+// data. pf_addr_fifo.sv's mirror-image poisoning of in-flight predictive
+// fetches is a separate concern (no predictive path exists in this
+// standalone TB to exercise it against) and is not covered here.
+//
 // Combinational outputs (ar_valid_o, r_valid_o, ...) are only ever
 // inspected at @(negedge clk), never in the same statement flow as the
 // input change that drives them: pf_rob's always_ff is sensitive only to
@@ -61,6 +68,11 @@ module unit_smoke_tb;
   size_t fill_size;
   r_t    fill_data;
 
+  logic          inval_valid;
+  addr_t         inval_addr;
+  axi_pkg::len_t inval_len;
+  size_t         inval_size;
+
   pf_data_buffer #(
     .Depth (Depth),
     .addr_t(addr_t),
@@ -78,7 +90,11 @@ module unit_smoke_tb;
     .fill_valid_i  (fill_valid  ),
     .fill_addr_i   (fill_addr   ),
     .fill_size_i   (fill_size   ),
-    .fill_data_i   (fill_data   )
+    .fill_data_i   (fill_data   ),
+    .inval_valid_i (inval_valid ),
+    .inval_addr_i  (inval_addr  ),
+    .inval_len_i   (inval_len   ),
+    .inval_size_i  (inval_size  )
   );
 
   ar_t   ar_i;
@@ -155,9 +171,10 @@ module unit_smoke_tb;
   endtask
 
   initial begin
-    ar_valid_i = 1'b0;
-    fill_valid = 1'b0;
-    r_valid_i  = 1'b0;
+    ar_valid_i  = 1'b0;
+    fill_valid  = 1'b0;
+    r_valid_i   = 1'b0;
+    inval_valid = 1'b0;
     repeat (3) step();
     rst_n = 1'b1;
     repeat (2) step();
@@ -249,6 +266,30 @@ module unit_smoke_tb;
       else $fatal(1, "step4: younger hit's data should release immediately after, in order");
     step();
     $display("[PASS] step4: hit does not jump the queue ahead of an older outstanding miss");
+
+    // -------------------------------------------------------------------
+    // Step 5: coherency. Seed an entry, then simulate a CVA6 store landing
+    // on it (pf_data_buffer.sv's inval_* port) -- a subsequent real AR to
+    // the same {addr,size} must miss (touch the real AR channel) instead
+    // of serving the now-stale cached data.
+    // -------------------------------------------------------------------
+    seed_buffer(16'h0600, 3'h2, '{data: 32'hEEEE_0006});
+
+    inval_addr  = 16'h0600;
+    inval_len   = 8'h00;
+    inval_size  = 3'h2;
+    inval_valid = 1'b1;
+    step();
+    inval_valid = 1'b0;
+
+    ar_i       = '{addr: 16'h0600, len: 8'h00, size: 3'h2};
+    ar_valid_i = 1'b1;
+    check_point();
+    assert (ar_valid_o && ar_o.addr == 16'h0600)
+      else $fatal(1, "step5: post-invalidate AR should miss and forward a real AR");
+    step();
+    ar_valid_i = 1'b0;
+    $display("[PASS] step5: store invalidation clears the cached entry, next AR misses");
 
     $display("[PASS] all unit_smoke_tb checks passed");
     $finish;

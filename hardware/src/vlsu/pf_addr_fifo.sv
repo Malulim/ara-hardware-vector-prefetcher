@@ -9,11 +9,26 @@
 // on the pop side) and is deliberately not this module's concern -- keeping
 // the two separate means a bug in "is this a real pop opportunity" can
 // never be confused with a bug in "did the FIFO preserve order."
+//
+// Backed by an explicit head/tail array (pf_rob.sv's style) rather than
+// fifo_v3: a CVA6 store can land on an address this FIFO is still holding
+// -- the predictive AR was issued before the store, so no entry exists yet
+// in pf_data_buffer for inval to clear (see pf_data_buffer.sv's own
+// inval_* ports), but the stale data is still going to arrive here and get
+// cached *after* the store already landed. Content-addressable poisoning
+// closes that window: an entry hit by inval_* is marked poisoned_q instead
+// of removed (removal would desync pop order from push order), and
+// pop_poisoned_o tells the caller (pf_r_router) to discard that entry's R
+// data instead of filling the buffer with it. fifo_v3 does not expose its
+// internal storage for this kind of side compare, hence the rewrite.
 
-module pf_addr_fifo #(
+module pf_addr_fifo import pf_pkg::*; #(
     parameter int  unsigned Depth  = 4,
     parameter type          addr_t = logic,
-    parameter type          size_t = logic
+    parameter type          size_t = logic,
+    // Dependent parameters. DO NOT CHANGE!
+    localparam int unsigned IdxWidth   = (Depth > 1) ? $clog2(Depth) : 1,
+    localparam int unsigned CountWidth = $clog2(Depth + 1)
   ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -27,7 +42,16 @@ module pf_addr_fifo #(
     input  logic  pop_i,
     output addr_t pop_addr_o,
     output size_t pop_size_o,
-    output logic  empty_o
+    output logic  pop_poisoned_o,
+    output logic  empty_o,
+
+    // Coherency: see header comment. Same {addr, len, size} shape as
+    // pf_data_buffer.sv's inval_* ports -- both are driven from the same
+    // CVA6 store snoop, see prefetch_buffer.sv.
+    input  logic          inval_valid_i,
+    input  addr_t         inval_addr_i,
+    input  axi_pkg::len_t inval_len_i,
+    input  size_t         inval_size_i
   );
 
   typedef struct packed {
@@ -35,27 +59,78 @@ module pf_addr_fifo #(
     size_t size;
   } entry_t;
 
-  entry_t push_data, pop_data;
-  assign push_data = entry_t'{addr: push_addr_i, size: push_size_i};
+  entry_t [Depth-1:0] entry_q;
+  logic   [Depth-1:0] valid_q;
+  logic   [Depth-1:0] poisoned_q;
 
-  fifo_v3 #(
-    .DEPTH(Depth),
-    .dtype(entry_t)
-  ) i_fifo (
-    .clk_i     (clk_i       ),
-    .rst_ni    (rst_ni      ),
-    .flush_i   (flush_i     ),
-    .testmode_i(1'b0        ),
-    .data_i    (push_data   ),
-    .push_i    (push_valid_i),
-    .full_o    (full_o      ),
-    .data_o    (pop_data    ),
-    .pop_i     (pop_i       ),
-    .empty_o   (empty_o     ),
-    .usage_o   (/* unused */)
-  );
+  logic [IdxWidth-1:0]   head_ptr_d, head_ptr_q;
+  logic [IdxWidth-1:0]   tail_ptr_d, tail_ptr_q;
+  logic [CountWidth-1:0] count_d, count_q;
 
-  assign pop_addr_o = pop_data.addr;
-  assign pop_size_o = pop_data.size;
+  assign full_o  = (count_q == CountWidth'(Depth));
+  assign empty_o = (count_q == CountWidth'(0));
+
+  logic push_fire, pop_fire;
+  assign push_fire = push_valid_i && !full_o;
+  assign pop_fire   = pop_i && !empty_o;
+
+  assign pop_addr_o     = entry_q[head_ptr_q].addr;
+  assign pop_size_o     = entry_q[head_ptr_q].size;
+  assign pop_poisoned_o = poisoned_q[head_ptr_q];
+
+  // One entry is always exactly one predictive (single-beat) AR (see
+  // prefetch_buffer.sv: pred_ar always has len=0), so its byte range is
+  // [addr, addr + 2^size).
+  logic [Depth-1:0] inval_match;
+  for (genvar i = 0; i < Depth; i++) begin : g_inval
+    assign inval_match[i] = inval_valid_i && valid_q[i]
+                              && ranges_overlap(
+                                   64'(entry_q[i].addr), 64'd1 << entry_q[i].size,
+                                   64'(inval_addr_i), (64'(inval_len_i) + 64'd1) << inval_size_i
+                                 );
+  end
+
+  always_comb begin
+    head_ptr_d = head_ptr_q;
+    tail_ptr_d = tail_ptr_q;
+    count_d    = count_q;
+    if (push_fire) tail_ptr_d = (tail_ptr_q == IdxWidth'(Depth - 1)) ? '0 : tail_ptr_q + 1;
+    if (pop_fire)  head_ptr_d = (head_ptr_q == IdxWidth'(Depth - 1)) ? '0 : head_ptr_q + 1;
+    unique case ({push_fire, pop_fire})
+      2'b10:   count_d = count_q + CountWidth'(1);
+      2'b01:   count_d = count_q - CountWidth'(1);
+      default: count_d = count_q;
+    endcase
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      entry_q    <= '0;
+      valid_q    <= '0;
+      poisoned_q <= '0;
+      head_ptr_q <= '0;
+      tail_ptr_q <= '0;
+      count_q    <= '0;
+    end else if (flush_i) begin
+      valid_q    <= '0;
+      poisoned_q <= '0;
+      head_ptr_q <= '0;
+      tail_ptr_q <= '0;
+      count_q    <= '0;
+    end else begin
+      if (push_fire) begin
+        entry_q[tail_ptr_q]    <= entry_t'{addr: push_addr_i, size: push_size_i};
+        valid_q[tail_ptr_q]    <= 1'b1;
+        poisoned_q[tail_ptr_q] <= 1'b0;
+      end
+      if (pop_fire) valid_q[head_ptr_q] <= 1'b0;
+      for (int unsigned i = 0; i < Depth; i++) begin
+        if (inval_match[i]) poisoned_q[i] <= 1'b1;
+      end
+      head_ptr_q <= head_ptr_d;
+      tail_ptr_q <= tail_ptr_d;
+      count_q    <= count_d;
+    end
+  end
 
 endmodule : pf_addr_fifo
