@@ -31,9 +31,18 @@ int main(int argc, char** argv) {
   trace->open("unit.vcd");
 #endif
 
+  // --timing designs (e.g. `always #5 clk = ~clk;`) schedule events at
+  // specific future times; eval() alone does not advance main_time to
+  // them. Per Verilator's timing-model API, after each eval() we must
+  // jump main_time to eventsPending() ? nextTimeSlot() ourselves, or
+  // @(negedge)/#delay ordering silently desyncs from posedge.
   while (!Verilated::gotFinish()) {
     top->eval();
-    main_time++;
+    if (top->eventsPending()) {
+      main_time = top->nextTimeSlot();
+    } else {
+      break;
+    }
 #if defined(TRACE_VCD)
     trace->dump(main_time);
 #endif
