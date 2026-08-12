@@ -1,21 +1,17 @@
-// Description:
-// Pattern classification (Sec. 5.1 of the prefetcher design). Purely
-// combinational: RVV gives stride directly in the instruction encoding, so
-// there is nothing to infer here, unlike a classic IP-stride prefetcher.
-// VLE/VLSE are prefetchable; everything else (indexed, segment, all stores)
-// is not.
+// Pattern classification. Purely combinational: RVV gives stride directly
+// in the instruction encoding, so there's nothing to infer here, unlike a
+// classic IP-stride prefetcher. VLE/VLSE are prefetchable; everything else
+// (indexed, segment, all stores) is not.
 //
 // size_o mirrors pe_req_i.vtype.vsew (the AXI size encoding Ara's own
-// addrgen already uses for this access) so that downstream hit comparisons
-// can check {addr, size}, not just addr -- two accesses to the same address
-// at different element widths must not be allowed to alias one another.
-// size is computed independently of byte_stride_o so a bug in the stride
-// arithmetic can never masquerade as a size bug or vice versa.
+// addrgen already uses) so downstream hit comparisons can check
+// {addr, size}, not just addr -- two accesses to the same address at
+// different element widths must not alias. Computed independently of
+// byte_stride_o so a stride bug can never masquerade as a size bug.
 //
-// is_strided_o: the one extra bit throttle (Sec. 5.3) needs to enforce the
-// v1 scope decision (Sec. 10.1) -- only VLSE predictions become real
-// predictive ARs, VLE stays observe-only. Decoded here (not re-derived
-// downstream) for the same single-source-of-truth reason as size_o.
+// is_strided_o: the one extra bit pf_throttle needs -- only VLSE
+// predictions become real predictive ARs, VLE stays observe-only. Decoded
+// here, not re-derived downstream, for the same reason as size_o.
 
 module pf_classifier import ara_pkg::*; #(
     parameter type pe_req_t = logic,

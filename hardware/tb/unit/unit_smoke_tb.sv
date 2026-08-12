@@ -1,4 +1,3 @@
-// Description:
 // Directed smoke test for pf_rob.sv + pf_data_buffer.sv wired together --
 // the two modules responsible for the prefetcher's one correctness-
 // critical property: real ARs are released to vldu strictly in the order

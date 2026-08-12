@@ -1,37 +1,32 @@
-// Description:
-// Address prediction + confidence FSM (Sec. 5.2 of the prefetcher design).
+// Address prediction + confidence FSM.
 // predicted_next_base = scalar_op + vl * byte_stride for both VLE and
 // VLSE: expanding the vstart terms shows they cancel algebraically, so
 // vstart needs no special-casing here (only vl's own extremes -- 0 and
 // VLMAX -- are real boundary cases).
 //
 // size_i/size_o, is_strided_i/predicted_is_strided_o: forwarded as-is
-// alongside the predicted address, latched in the same cycle as new_insn.
-// This module never re-derives them from pe_req_i itself -- pf_classifier
-// already computed them once, and reading pe_req fields in two different
-// places for two different outputs is exactly the kind of thing that
-// drifts apart silently when one branch gets edited later and the other
-// doesn't.
+// alongside the predicted address, latched the same cycle as new_insn.
+// Never re-derived from pe_req_i -- pf_classifier already computed them
+// once, and reading pe_req fields in two places for two outputs is
+// exactly the kind of thing that drifts apart silently later.
 //
-// Confidence FSM: every new_insn, this module checks whether the address
-// it predicted *last* time (pending_addr_q, before this cycle overwrites
-// it) matches this instruction's actual scalar_op. A match advances
+// Confidence FSM: every new_insn, checks whether the address predicted
+// *last* time (pending_addr_q, before this cycle overwrites it) matches
+// this instruction's actual scalar_op. A match advances
 // NO_PRED -> TRANSIENT -> STEADY (saturating); a miss drops straight back
 // to NO_PRED from either state and pulses mispredict_o for one cycle.
-// predict_valid_o is only ever asserted once the *new* state (conf_d) is
-// TRANSIENT or STEADY -- "只在transient/steady状态发出预测AR". The address/
-// size/is_strided themselves are still latched every new_insn regardless
-// of confidence, both because they are this check's own comparison basis
-// next time, and so throttle sees a consistent is_strided alongside
+// predict_valid_o only asserts once the *new* state (conf_d) is
+// TRANSIENT or STEADY. address/size/is_strided are still latched every
+// new_insn regardless of confidence, both as next time's comparison
+// basis and so pf_throttle sees a consistent is_strided alongside
 // whatever address eventually does go valid.
 //
 // Holds at most one pending prediction via a valid/ready handshake (the
-// "1-deep skid register" pf_rob's AR arbitration assumes its caller has):
+// 1-deep skid register pf_rob's AR arbitration assumes its caller has):
 // the predictive AR can lose arbitration to real traffic for an unbounded
 // number of cycles, so the prediction must stay live until accepted. If a
-// new qualifying instruction arrives before the old prediction was
-// accepted, the old one is simply dropped in favor of the new one -- a
-// missed prefetch opportunity, not a correctness bug.
+// new qualifying instruction arrives first, the old prediction is simply
+// dropped -- a missed prefetch opportunity, not a correctness bug.
 
 module pf_predictor import pf_pkg::*; #(
     parameter type pe_req_t = logic,
@@ -82,8 +77,8 @@ module pf_predictor import pf_pkg::*; #(
                      (!last_id_valid_q || (pe_req_i.id != last_id_q));
 
   // Compute in a generously wide temporary so neither operand's native
-  // width can silently truncate the product before the final cast down to
-  // addr_t -- exactly the kind of boundary bug Phase 2 is meant to catch.
+  // width can silently truncate the product before the final cast down
+  // to addr_t.
   logic [127:0] predicted_addr_wide;
   assign predicted_addr_wide = 128'(pe_req_i.scalar_op) + 128'(pe_req_i.vl) * 128'(byte_stride_i);
 

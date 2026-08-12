@@ -1,28 +1,25 @@
-// Description:
-// R data demux by id (Sec. 5.5 of the prefetcher design). Pure
-// combinational, no state: id=0 (real path) goes to pf_rob, id=1
-// (predictive) pops its {addr, size} from the pending-address tracker
-// (pf_addr_fifo, instantiated at the prefetch_buffer.sv top level -- AXI's
-// R channel never echoes back the request address) and, only if r_resp is
-// RESP_OKAY, fills the data buffer. A non-OKAY response (SLVERR/DECERR/
-// EXOKAY) still pops the tracker -- it must, or the tracker desyncs from
-// future predictive completions -- but is otherwise discarded: caching it
-// would let corrupt data masquerade as a hit on a later real access.
-// vldu's own real path has never checked r_resp (it trusts the bus), but
-// a prefetch result sitting in the buffer for an arbitrary number of
-// cycles before anyone asks for it is a different risk profile and gets
-// checked here.
+// R data demux by id. Pure combinational, no state: id=0 (real path)
+// goes to pf_rob, id=1 (predictive) pops its {addr, size} from the
+// pending-address tracker (pf_addr_fifo, instantiated at the
+// prefetch_buffer.sv top level -- AXI's R channel never echoes back the
+// request address) and, only if r_resp is RESP_OKAY, fills the data
+// buffer. A non-OKAY response (SLVERR/DECERR/EXOKAY) still pops the
+// tracker -- it must, or the tracker desyncs from future predictive
+// completions -- but is otherwise discarded: caching it would let
+// corrupt data masquerade as a hit on a later real access. vldu's own
+// real path never checks r_resp (it trusts the bus), but a prefetch
+// result sitting in the buffer for an arbitrary number of cycles before
+// anyone asks for it is a different risk profile and gets checked here.
 //
-// A predictive beat is always single-beat (Sec. pf_rob.sv only ever issues
+// A predictive beat is always single-beat (pf_rob.sv only ever issues
 // len=0 predictive ARs), so every one accepted here is an immediate,
-// complete pop+fill decision -- there is no buffer-full backpressure to
-// apply on this side, since pf_data_buffer always has room via FIFO
-// replacement.
+// complete pop+fill decision -- no buffer-full backpressure to apply on
+// this side, since pf_data_buffer always has room via FIFO replacement.
 //
-// pred_addr_fifo_poisoned_i: a CVA6 store landed on this address while the
-// fetch was still in flight (pf_addr_fifo.sv's content-addressable
-// invalidation -- see its header comment). Treated the same as a non-OKAY
-// resp: still pops the tracker, never fills the buffer.
+// pred_addr_fifo_poisoned_i: a CVA6 store landed on this address while
+// the fetch was still in flight (pf_addr_fifo.sv's content-addressable
+// invalidation). Treated the same as a non-OKAY resp: still pops the
+// tracker, never fills the buffer.
 
 module pf_r_router import axi_pkg::RESP_OKAY; #(
     parameter type axi_r_t = logic,

@@ -1,23 +1,19 @@
-// Description:
-// Fully-associative prefetch data buffer (Sec. 5.6 of the prefetcher
-// design). Entries are only ever {empty, valid} -- there is no
-// "in-flight" entry state. An address with a predictive AR outstanding
-// but no R data yet is simply not in this buffer at all; a query against
-// it reports EMPTY, the same as an address that was never requested, and
-// falls through the existing miss path with no extra branch. Counting how
-// many predictive ARs are outstanding (for throttling) is a separate,
-// address-agnostic concern that does not belong in this state machine --
-// see pf_throttle.sv, which gets this for free from pred_addr_fifo's own
-// full_o rather than keeping a second, redundant counter.
+// Fully-associative prefetch data buffer. Entries are only ever {empty,
+// valid} -- there's no "in-flight" state. An address with a predictive AR
+// outstanding but no R data yet simply isn't in this buffer; a query
+// against it reports EMPTY, same as an address never requested, and falls
+// through the existing miss path with no extra branch. Counting
+// outstanding predictive ARs (for throttling) is a separate concern --
+// see pf_throttle.sv, which gets it for free from pred_addr_fifo's
+// full_o instead of a second, redundant counter.
 //
 // Entry is {addr, size, data, state}, not just {addr, data, state}: a hit
 // requires addr == query_addr AND size == query_size. Address-only
 // matching would let e.g. a vlse32 prefetch at address A satisfy a later
-// vlse64 real request at the same address A, silently handing vldu data
-// that was fetched (and sized) for the wrong element width. FIFO
-// replacement on fill, no dedup against an already-cached {addr,size} (a
-// harmless minor inefficiency: a lookup only needs *a* matching valid
-// entry, not a unique one).
+// vlse64 request at the same address, silently handing back data sized
+// for the wrong element width. FIFO replacement on fill, no dedup against
+// an already-cached {addr,size} -- a lookup only needs *a* matching valid
+// entry, not a unique one.
 
 module pf_data_buffer import pf_pkg::*; #(
     parameter int  unsigned Depth  = 4,

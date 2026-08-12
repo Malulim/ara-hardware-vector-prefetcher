@@ -1,9 +1,8 @@
-// Description:
 // Sits on Ara's AR/R load path, between the address generator and the AXI
-// cut. Pure module-to-module wiring, no decision logic of its own (Sec.
-// "文件拆分" of the prefetcher design) -- the actual behavior lives in
-// pf_classifier.sv, pf_predictor.sv, pf_throttle.sv, pf_addr_fifo.sv,
-// pf_rob.sv, pf_r_router.sv and pf_data_buffer.sv.
+// cut. Pure module-to-module wiring, no decision logic of its own -- the
+// actual behavior lives in pf_classifier.sv, pf_predictor.sv,
+// pf_throttle.sv, pf_addr_fifo.sv, pf_rob.sv, pf_r_router.sv and
+// pf_data_buffer.sv.
 //
 // classifier + predictor run for every VLE/VLSE instruction observed on
 // pe_req_i, which is wired in separately from (not derived from) the AR/R
@@ -11,8 +10,8 @@
 // the AXI channels. predictor's confidence FSM decides *whether* a given
 // instruction's prediction is trusted enough to offer downstream at all;
 // throttle then additionally only lets strided (VLSE) predictions become
-// real predictive ARs (Sec. 10.1) -- VLE still builds confidence-FSM
-// state for future reference but never reaches the AXI bus. A hit is
+// real predictive ARs -- VLE still builds confidence-FSM state for
+// future reference but never reaches the AXI bus. A hit is
 // only ever recognized for a single-beat (len=0) request whose {addr,
 // size} both match a cached entry, since the buffer caches one beat per
 // entry. A predictive (id=1) completion is only cached if its r_resp is
@@ -31,7 +30,6 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     // at once. Matches VaddrgenInsnQueueDepth (ara_pkg.sv) so this stage
     // does not reduce Ara's existing outstanding-request capacity.
     parameter int  unsigned RobDepth          = 4,
-    // Data buffer entry count (Sec. 5.6: "4-8 entries").
     parameter int  unsigned DataBufDepth      = 4,
     // Depth of the side FIFO tracking addresses of outstanding predictive
     // ARs -- AXI's R channel never echoes back the request address.
@@ -92,7 +90,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   assign rob_flush = 1'b0;
 
   // ---------------------------------------------------------------------
-  // 5.1 / 5.2: classify + predict the next instruction's base address.
+  // Classify + predict the next instruction's base address.
   // size_o/predicted_size_o/is_strided are forwarded end-to-end, never
   // re-derived.
   // ---------------------------------------------------------------------
@@ -145,9 +143,9 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   assign flush = mispredict;
 
   // ---------------------------------------------------------------------
-  // 5.3: throttle. v1 scope -- only strided predictions ever become a
-  // real predictive AR (Sec. 10.1); the "distance N" / in-flight-cap M
-  // simplifications are documented in pf_throttle.sv's own header.
+  // Throttle. v1 scope -- only strided predictions ever become a real
+  // predictive AR; the "distance N" / in-flight-cap M simplifications
+  // are documented in pf_throttle.sv's own header.
   // ---------------------------------------------------------------------
   logic pred_valid_gated, pred_ready_gated;
 
@@ -207,7 +205,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   );
 
   // ---------------------------------------------------------------------
-  // 5.4: ROB + real-path handler. Arbitrates real vs. predictive AR for
+  // ROB + real-path handler. Arbitrates real vs. predictive AR for
   // the one physical AR_OUT channel (real always wins); releases to vldu
   // strictly in the order real ARs were issued, regardless of whether
   // each one was satisfied by a buffer hit or a real fetch.
@@ -256,7 +254,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   );
 
   // ---------------------------------------------------------------------
-  // 5.5: split the one physical R channel by id; gate the fill on resp.
+  // Split the one physical R channel by id; gate the fill on resp.
   // ---------------------------------------------------------------------
   logic  fill_valid;
   addr_t fill_addr;
@@ -285,7 +283,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   );
 
   // ---------------------------------------------------------------------
-  // 5.6: data buffer. Two states only (empty/valid) -- see pf_data_buffer.sv.
+  // Data buffer. Two states only (empty/valid) -- see pf_data_buffer.sv.
   // ---------------------------------------------------------------------
   pf_data_buffer #(
     .Depth (DataBufDepth),

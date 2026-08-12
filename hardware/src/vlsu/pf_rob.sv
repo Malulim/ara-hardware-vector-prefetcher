@@ -1,5 +1,4 @@
-// Description:
-// Reorder buffer + real-path handler (Sec. 5.4 of the prefetcher design).
+// Reorder buffer + real-path handler.
 // One slot tracks one outstanding AR (up to 256 AXI beats for a real miss,
 // always exactly 1 beat for a hit), not one beat: the predictor reasons
 // about where the *next instruction* starts, so the unit of in-order

@@ -1,26 +1,22 @@
-// Description:
-// Address tracking FIFO (Sec. 5.3.5 of the prefetcher design). AXI's R
-// channel never echoes back the request address, so this remembers
-// {addr, size} for every outstanding predictive AR, in issue order, until
-// its R beat arrives and needs to know what it was fetching.
+// Address tracking FIFO. AXI's R channel never echoes back the request
+// address, so this remembers {addr, size} for every outstanding
+// predictive AR, in issue order, until its R beat arrives.
 //
-// Pure FIFO semantics only: pop order must equal push order. *When* to
-// push or pop is the caller's job (throttle on the push side, the R router
-// on the pop side) and is deliberately not this module's concern -- keeping
-// the two separate means a bug in "is this a real pop opportunity" can
-// never be confused with a bug in "did the FIFO preserve order."
+// Pure FIFO semantics: pop order equals push order. When to push/pop is
+// the caller's job (pf_throttle on push, pf_r_router on pop), kept
+// separate so a bug in "is this a real pop opportunity" can't be confused
+// with a bug in "did the FIFO preserve order."
 //
-// Backed by an explicit head/tail array (pf_rob.sv's style) rather than
-// fifo_v3: a CVA6 store can land on an address this FIFO is still holding
-// -- the predictive AR was issued before the store, so no entry exists yet
-// in pf_data_buffer for inval to clear (see pf_data_buffer.sv's own
-// inval_* ports), but the stale data is still going to arrive here and get
-// cached *after* the store already landed. Content-addressable poisoning
-// closes that window: an entry hit by inval_* is marked poisoned_q instead
-// of removed (removal would desync pop order from push order), and
-// pop_poisoned_o tells the caller (pf_r_router) to discard that entry's R
-// data instead of filling the buffer with it. fifo_v3 does not expose its
-// internal storage for this kind of side compare, hence the rewrite.
+// Backed by an explicit head/tail array rather than fifo_v3: a CVA6 store
+// can land on an address this FIFO is still holding (the predictive AR
+// was issued before the store, so pf_data_buffer has no entry yet for
+// inval to clear), but the stale R data is still going to arrive and get
+// cached after the store landed. Content-addressable poisoning closes
+// that window: an inval_* hit marks the entry poisoned_q instead of
+// removing it (removal would desync pop order from push order), and
+// pop_poisoned_o tells pf_r_router to discard that entry's data instead
+// of caching it. fifo_v3 doesn't expose its storage for that kind of
+// side compare, hence the rewrite.
 
 module pf_addr_fifo import pf_pkg::*; #(
     parameter int  unsigned Depth  = 4,
