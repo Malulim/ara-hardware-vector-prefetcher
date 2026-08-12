@@ -17,6 +17,19 @@
 // pop_poisoned_o tells pf_r_router to discard that entry's data instead
 // of caching it. fifo_v3 doesn't expose its storage for that kind of
 // side compare, hence the rewrite.
+//
+// Deliberately has no flush_i, unlike pf_data_buffer. This is not
+// speculative state that a mispredict may discard -- it is a record of
+// which predictive ARs are physically outstanding on the bus, and a
+// mispredict does not un-issue them. Clearing it on mispredict desyncs
+// this FIFO from the bus: the in-flight R still arrives, pf_r_router
+// still pops, and the pop reads whichever entry the reset pointers now
+// happen to address -- filling pf_data_buffer with real data under a
+// stale {addr, size}, which a later real load then hits and consumes as
+// its own. That is silent data corruption, so the only thing that may
+// reset this FIFO is rst_ni. A post-mispredict completion instead fills
+// the buffer under its own correct key: a stale-pattern prefetch is
+// merely useless, never wrong.
 
 module pf_addr_fifo import pf_pkg::*; #(
     parameter int  unsigned Depth  = 4,
@@ -28,7 +41,6 @@ module pf_addr_fifo import pf_pkg::*; #(
   ) (
     input  logic clk_i,
     input  logic rst_ni,
-    input  logic flush_i,
 
     input  logic  push_valid_i,
     input  addr_t push_addr_i,
@@ -102,12 +114,6 @@ module pf_addr_fifo import pf_pkg::*; #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       entry_q    <= '0;
-      valid_q    <= '0;
-      poisoned_q <= '0;
-      head_ptr_q <= '0;
-      tail_ptr_q <= '0;
-      count_q    <= '0;
-    end else if (flush_i) begin
       valid_q    <= '0;
       poisoned_q <= '0;
       head_ptr_q <= '0;

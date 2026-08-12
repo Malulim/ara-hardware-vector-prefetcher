@@ -13,12 +13,14 @@
 // combinational or a thin wrapper around a proven common_cells FIFO; the
 // ROB+buffer pair is where an actual bug would hide).
 //
-// Also exercises pf_data_buffer.sv's inval_* port directly (step5): a
-// simulated CVA6 store overlapping a cached entry's address must clear it,
-// so a subsequent real AR to that address misses instead of hitting stale
-// data. pf_addr_fifo.sv's mirror-image poisoning of in-flight predictive
-// fetches is a separate concern (no predictive path exists in this
-// standalone TB to exercise it against) and is not covered here.
+// Also exercises both halves of the coherency mechanism. step5 drives
+// pf_data_buffer.sv's inval_* port: a simulated CVA6 store overlapping a
+// cached entry's address must clear it, so a subsequent real AR to that
+// address misses instead of hitting stale data. step6 drives
+// pf_addr_fifo.sv (instantiated standalone -- no predictive AR path
+// exists in this TB to reach it through) for the mirror-image case, where
+// the store lands while the fetch is still in flight and no buffer entry
+// exists yet to clear.
 //
 // Combinational outputs (ar_valid_o, r_valid_o, ...) are only ever
 // inspected at @(negedge clk), never in the same statement flow as the
@@ -96,6 +98,45 @@ module unit_smoke_tb;
     .inval_size_i  (inval_size  )
   );
 
+  // pf_addr_fifo, instantiated standalone (step6). Not wired to the
+  // pf_rob/pf_data_buffer pair above -- this TB has no predictive AR path
+  // to drive it end-to-end, but its two properties (pop order equals push
+  // order; an inval poisons exactly the overlapping entry and that flag
+  // survives to the pop) are checkable in isolation, and the second is the
+  // half of the coherency mechanism step5 does not reach.
+  logic          af_push_valid, af_full;
+  addr_t         af_push_addr;
+  size_t         af_push_size;
+  logic          af_pop, af_pop_poisoned, af_empty;
+  addr_t         af_pop_addr;
+  size_t         af_pop_size;
+  logic          af_inval_valid;
+  addr_t         af_inval_addr;
+  axi_pkg::len_t af_inval_len;
+  size_t         af_inval_size;
+
+  pf_addr_fifo #(
+    .Depth (Depth),
+    .addr_t(addr_t),
+    .size_t(size_t)
+  ) i_addr_fifo (
+    .clk_i         (clk            ),
+    .rst_ni        (rst_n          ),
+    .push_valid_i  (af_push_valid  ),
+    .push_addr_i   (af_push_addr   ),
+    .push_size_i   (af_push_size   ),
+    .full_o        (af_full        ),
+    .pop_i         (af_pop         ),
+    .pop_addr_o    (af_pop_addr    ),
+    .pop_size_o    (af_pop_size    ),
+    .pop_poisoned_o(af_pop_poisoned),
+    .empty_o       (af_empty       ),
+    .inval_valid_i (af_inval_valid ),
+    .inval_addr_i  (af_inval_addr  ),
+    .inval_len_i   (af_inval_len   ),
+    .inval_size_i  (af_inval_size  )
+  );
+
   ar_t   ar_i;
   logic  ar_valid_i, ar_ready_o;
   ar_t   ar_o;
@@ -170,10 +211,13 @@ module unit_smoke_tb;
   endtask
 
   initial begin
-    ar_valid_i  = 1'b0;
-    fill_valid  = 1'b0;
-    r_valid_i   = 1'b0;
-    inval_valid = 1'b0;
+    ar_valid_i     = 1'b0;
+    fill_valid     = 1'b0;
+    r_valid_i      = 1'b0;
+    inval_valid    = 1'b0;
+    af_push_valid  = 1'b0;
+    af_pop         = 1'b0;
+    af_inval_valid = 1'b0;
     repeat (3) step();
     rst_n = 1'b1;
     repeat (2) step();
@@ -289,6 +333,54 @@ module unit_smoke_tb;
     step();
     ar_valid_i = 1'b0;
     $display("[PASS] step5: store invalidation clears the cached entry, next AR misses");
+
+    // -------------------------------------------------------------------
+    // Step 6: pf_addr_fifo's half of the coherency mechanism. Two
+    // predictive ARs are outstanding; a CVA6 store lands on the second
+    // one's address while it is still in flight. The store must poison
+    // exactly that entry -- not the first, not the whole FIFO -- and pop
+    // order must stay push order so pf_r_router still pairs each returning
+    // beat with the address that requested it.
+    //
+    // Also the regression guard for the flush bug: pf_addr_fifo has no
+    // flush_i precisely because a mispredict cannot un-issue an AR already
+    // on the bus. Re-adding one that resets the pointers would leave a
+    // returning beat popping a stale {addr, size} and filling the data
+    // buffer under the wrong key -- data corruption a later real load
+    // would consume as its own.
+    // -------------------------------------------------------------------
+    af_push_addr  = 16'h0700;
+    af_push_size  = 3'h2;
+    af_push_valid = 1'b1;
+    step();
+    af_push_addr = 16'h0800;
+    step();
+    af_push_valid = 1'b0;
+
+    af_inval_addr  = 16'h0800;
+    af_inval_len   = 8'h00;
+    af_inval_size  = 3'h2;
+    af_inval_valid = 1'b1;
+    step();
+    af_inval_valid = 1'b0;
+
+    check_point();
+    assert (af_pop_addr == 16'h0700 && !af_pop_poisoned)
+      else $fatal(1, "step6: head must still be the older, un-stored-to entry, unpoisoned");
+    af_pop = 1'b1;
+    step();
+    af_pop = 1'b0;
+
+    check_point();
+    assert (af_pop_addr == 16'h0800 && af_pop_poisoned)
+      else $fatal(1, "step6: the stored-to in-flight entry must pop next, marked poisoned");
+    af_pop = 1'b1;
+    step();
+    af_pop = 1'b0;
+
+    check_point();
+    assert (af_empty) else $fatal(1, "step6: FIFO should be empty after both pops");
+    $display("[PASS] step6: store poisons only the in-flight entry it overlaps, pop order kept");
 
     $display("[PASS] all unit_smoke_tb checks passed");
     $finish;

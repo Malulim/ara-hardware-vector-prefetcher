@@ -82,9 +82,11 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   );
 
   // Driven by predictor's mispredict_o below. Deliberately reaches only
-  // pf_addr_fifo and pf_data_buffer, not pf_rob -- see the mispredict_o
-  // port comment in pf_predictor.sv for why pf_rob must never be reset by
-  // a stride guess going wrong.
+  // pf_data_buffer -- not pf_rob (see the mispredict_o port comment in
+  // pf_predictor.sv for why pf_rob must never be reset by a stride guess
+  // going wrong) and not pf_addr_fifo (which tracks ARs physically
+  // outstanding on the bus, and a mispredict does not un-issue them --
+  // see pf_addr_fifo.sv's header for the corruption clearing it causes).
   logic flush;
   logic rob_flush;
   assign rob_flush = 1'b0;
@@ -188,7 +190,6 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   ) i_pred_addr_fifo (
     .clk_i         (clk_i                  ),
     .rst_ni        (rst_ni                 ),
-    .flush_i       (flush                  ),
     .push_valid_i  (pred_addr_fifo_push    ),
     .push_addr_i   (predicted_addr         ),
     .push_size_i   (predicted_size         ),
