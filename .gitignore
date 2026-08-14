@@ -39,3 +39,4 @@ pyenv_ara/
 docs/build/
 docs/source/_templates/
 apps/_*.slang/server.json
+hardware/filelist_slang.f
