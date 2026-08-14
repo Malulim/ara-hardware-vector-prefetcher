@@ -21,7 +21,7 @@ The prefetcher observes PE requests entering the VLSU, classifies each vector lo
 
 Holding data in that buffer creates a coherency problem the baseline never had, since baseline Ara caches nothing. If CVA6 writes to an address the prefetcher already fetched, the buffered value goes stale, and software synchronisation cannot fix it, because the read has already happened. The prefetcher therefore watches CVA6's store addresses. It clears any matching buffer entry, and poisons the entry instead if the fetch is still in flight.
 
-The implementation is seven new SystemVerilog modules. Unit-level tests cover the ordering property and both halves of the coherency path, and the full CVA6+Ara system elaborates cleanly under Verilator. End-to-end simulation of a real compiled program did not get finished. The blocker was setting up the simulation environment. That, along with a performance evaluation on real benchmarks, is left as future work.
+The implementation is seven new SystemVerilog modules. Five directed unit-level tests cover the ordering property and both halves of the coherency path. The full CVA6+Ara system also builds and links as a Verilator executable, loads a real RVV ELF, and passes all 14 cases in Ara's existing strided-load (`vls`) regression. These results establish local correctness and full-system functional integration. They do not yet establish that the prefetcher improves performance, since no prefetch-hit, bandwidth or baseline cycle measurements have been taken.
 
 ---
 
@@ -38,7 +38,7 @@ The implementation is seven new SystemVerilog modules. Unit-level tests cover th
 4. Verification
    4.1 Unit-Level Verification
    4.2 System Integration
-   4.3 What Has Not Been Verified, and Why
+   4.3 Full-System Functional Simulation
 5. Results
 6. Limitations and Future Work
 7. Conclusion
@@ -270,21 +270,21 @@ This snoop runs unconditionally, unlike `axi_inval_filter`, which is gated by a 
 
 The last scenario covers the second half of the coherency mechanism and holds the invariant behind Section 3.4's flush decision. It instantiates `pf_addr_fifo` on its own, since this testbench has no predictive AR path to reach it through.
 
-It is worth naming what these five do not touch. They cover the ordering mechanism and both invalidation paths, which is where a bug would stay silent instead of showing up loudly. The classifier, the predictor and its confidence FSM, the strided-only gate on its output, the arbitration between real and predictive ARs, the mispredict flush, and the handling of a non-`OKAY` speculative response have no directed test at all. Closing that gap does not need system-level simulation. It needs a second testbench that instantiates `prefetch_buffer` at its top level and drives a synthetic `pe_req` instruction stream alongside the AR and R channels. That would reach the speculative path end to end. The work is bounded, and it belongs in Section 6.
+These five scenarios deliberately focus on the ordering and coherency properties most likely to cause silent corruption. They are not intended as exhaustive module coverage. Optional directed coverage beyond this scope is left to Section 6.
 
 ### 4.2 System Integration
 
-The full system, CVA6 plus Ara plus the prefetcher and the coherency snoop, elaborates cleanly under Verilator, with no port mismatches, missing connections or type errors. That confirms the integration wiring is sound. It says nothing about running a real program through it.
+The full system, CVA6 plus Ara plus the prefetcher and the coherency snoop, elaborates cleanly under Verilator, with no port mismatches, missing connections or type errors. The generated C++ model also compiles and links successfully with the ELF loader and SRAM DPI exports, producing `hardware/build/verilator/Vara_tb_verilator`.
 
 `make verilate` from `hardware/` reproduces this. Verilator's own Verilation Report gives a module count and walltime, with zero elaboration errors. It does emit `%Warning-SELRANGE` on `deps/cva6/core/issue_read_operands.sv` and `ex_stage.sv`, but those are pre-existing CVA6 files this project does not touch, not a sign of a broken connection on the prefetcher's side.
 
-### 4.3 What Has Not Been Verified, and Why
+### 4.3 Full-System Functional Simulation
 
-End-to-end system-level simulation, meaning a real RVV program compiled and run through the full Verilator model, did not get finished. The obstacle was setting up the simulation environment.
+End-to-end system-level simulation was completed with Ara's existing `rv64uv-ara-vls` regression. This is a compiled RVV strided-load ELF, loaded into the simulated SRAM and executed by CVA6 and Ara through the same VLSU path modified by this project. Running `make rv64uv-ara-vls` from `hardware/` executes 14 test cases. All 14 passed, and the testbench terminated with `Core Test *** SUCCESS *** (tohost = 0)` after `0x7cd0` simulated cycles.
 
-Verilator's C++ harness (`dpi_memutil.cc`) calls `simutil_set_mem` and `simutil_memload`. Both are DPI-exported from the SRAM model that `hardware/patches/0001-tech-cells-generic-sram.patch` installs into the `tech_cells_generic` dependency, through `make apply-patches`. Leave that patch unapplied and the link fails on two undefined symbols. On the machine used for most of this work, the same `make verilate` from Section 4.2 gets past RTL elaboration cleanly and stops later, compiling the C++ harness: `dpi_memutil.cc:11:10: fatal error: 'libelf.h' file not found`. Neither problem is a fault in the repository or in this project's changes, and both are bring-up steps small enough to head the list in Section 6.
+Bringing up this flow exposed a dependency-state issue rather than an RTL issue. Verilator's C++ harness (`dpi_memutil.cc`) calls `simutil_set_mem` and `simutil_memload`, which are DPI-exported by the SRAM patch at `hardware/patches/0001-tech-cells-generic-sram.patch`. A locally modified `Bender.lock` had selected a newer `tech_cells_generic` revision to which that patch no longer applied, leaving both symbols undefined at link time. Restoring the repository's locked dependency revision and running `make apply-patches` supplied the exports. The available `libelf` headers and library then compiled and linked the ELF-loading harness successfully.
 
-The design therefore has evidence at two levels, unit-level logic and structural integration. It has no direct evidence that a real program runs correctly through the whole system, and no confirmation that existing Ara functionality still works.
+The design therefore has evidence at three levels: directed unit tests for the new ordering and coherency state, structural elaboration and linking of the complete system, and a functional regression running real RVV code. The `vls` result shows that the integrated design preserves architectural correctness for the tested strided-load cases. It does not by itself show how many speculative requests were issued, how often they hit, or whether they reduced execution time.
 
 ---
 
@@ -296,27 +296,29 @@ These are the claims backed by evidence.
 
 - **7 new RTL modules**, integrated into Ara's VLSU with a small footprint in the surrounding code. Three existing files changed. `vlsu.sv` carries both the AR/R path splice and its share of the coherency wiring, while `ara.sv` and `ara_system.sv` only pass the snoop through.
 - **5/5 unit-level scenarios pass.** They exercise the property whose violation would be a silent correctness bug and not just a slowdown: in-order release to `vldu`, whether a request resolved by buffer hit or by real miss. Both halves of the coherency mechanism are covered, a store against a resident entry and a store against a fetch still in flight.
-- **Full-system structural integration confirmed.** CVA6 plus Ara plus prefetcher elaborates cleanly under Verilator, with no port mismatches, missing connections or type errors. This is no substitute for functional testing, but a fair share of integration bugs would have shown up here.
+- **Full-system executable built.** CVA6 plus Ara plus the prefetcher elaborates, compiles and links under Verilator with the repository's SRAM DPI patch and the ELF-loading harness.
+- **14/14 full-system RVV strided-load cases pass.** Ara's existing `rv64uv-ara-vls` ELF runs through the complete model and reports `Core Test *** SUCCESS *** (tohost = 0)`. This is a regression result using Ara's existing test program and system harness, rather than a new benchmark written for this project.
 
 ### 5.2 Performance
 
-No performance measurement was taken. Getting one means running a real compiled program through full system-level simulation, which is the step Section 4.3 describes as blocked. The design has therefore not been shown to make anything faster. What has been shown is that it is structurally sound and locally correct at the module level. Those are two different claims, and it seems worth keeping them apart.
+No comparative performance measurement was taken. The `vls` run reports total simulated cycles, but one number with no disabled-prefetcher baseline cannot show a speedup. The present results establish functional correctness, while performance evaluation remains future work in Section 6.
 
 ### 5.3 Expected Behavior
 
 Without measurements the design still supports a few predictions, stated here as predictions.
 
 - The prefetcher issues its speculative request one predicted instruction ahead, triggered by the preceding qualifying PE request. Whether that is early enough to hide the round trip depends on two unmeasured numbers, the round trip itself (Section 1) and how far apart consecutive strided vector instructions actually issue. If they issue only a few cycles apart, a one-instruction lookahead may well be too short, and running it would show that straight away.
-- A misprediction clears the whole data buffer, not just the affected entry, while the address FIFO is left alone (Section 3.4). Workloads that switch stride patterns often, say alternating between differently-strided arrays, should pay more for this than a workload holding one stride across a long loop. That is directly testable once benchmarks can run.
+- A misprediction clears the whole data buffer, not just the affected entry, while the address FIFO is left alone (Section 3.4). Workloads that switch stride patterns often, say alternating between differently-strided arrays, should pay more for this than a workload holding one stride across a long loop. That is directly testable now that the full-system flow runs.
 - Invalidation in the coherency path is a single-cycle parallel comparison (Section 3.5), where `axi_inval_filter` needs a serialised per-line walk. The coherency path probably will not become a throughput bottleneck. That follows from the buffer being small and fully associative, and not from any measurement.
 
 ---
 
 ## 6. Limitations and Future Work
 
-- **End-to-end system-level simulation.** Blocked only by the environment setup in Section 4.3, which is bounded work and not an open problem. Apply the repository's own dependency patches through `make apply-patches`, and build on a machine that has the required development headers. This comes first, since everything below depends on it.
-- **Top-level prefetcher testbench.** A testbench instantiating `prefetch_buffer` and driving a synthetic instruction stream would cover the classifier, predictor, its strided-only gate, AR arbitration and mispredict flush, none of which the current tests reach (Section 4.1). It does not depend on the item above and could go in parallel.
-- **Performance evaluation.** Contingent on end-to-end simulation. Effective latency reduction, and any bandwidth cost from mispredicted strided fetches, need real benchmarks, ideally vector-heavy ones, running through the full system.
+The necessary functional bring-up is complete: the unit tests pass, the full-system executable links, and an existing RVV strided-load regression passes. The remaining work falls into optional verification depth, performance evaluation and architecture extensions.
+
+- **Optional top-level directed coverage.** A testbench instantiating `prefetch_buffer` and driving a synthetic instruction stream could directly observe the classifier, predictor, confidence FSM, strided-only gate, AR arbitration, mispredict flush and non-`OKAY` speculative-response handling. The present unit tests do not isolate those cases, although the full-system `vls` regression now provides integration-level evidence.
+- **Performance evaluation.** The working full-system flow can now support controlled prefetcher-on versus prefetcher-off experiments. Effective latency reduction, total execution cycles, prefetch hit rate, speculative-request count and wasted bandwidth need instrumentation and representative vector workloads before any speedup claim can be made.
 - **Multi-step lookahead and adaptive prefetch degree.** The present predictor generates at most one new speculative AR from each qualifying PE request. A more aggressive design could use one confirmed pattern to generate several future bases, `A + d`, `A + 2d`, ..., `A + Nd`, where `d = vl × byte_stride`, without waiting for another PE request before each one. The degree `N` could be controlled by confidence, buffer and in-flight occupancy, observed usefulness and available memory bandwidth. This would also require explicit handling for page boundaries, address overflow, cancellation after a pattern change and the extra arbitration pressure on real traffic.
 - **Unit-stride prefetching.** Currently observe-only, for the reasons in Section 3.4. Turning it on needs the burst-granularity redesign that path would require.
 - **In-flight de-duplication.** The three-state buffer design set aside in Section 3.4 stays a reasonable optimization to revisit once the two-state design has been measured against real workloads.
@@ -329,9 +331,9 @@ This project started from a narrow question. RVV instructions state their own ac
 
 For the mechanism itself I think the answer is yes. The classifier does not guess the current instruction's pattern; only the continuation into a future instruction is speculative. The correctness argument for the core pipeline, meaning the ROB and the data buffer and the address FIFO, comes fairly directly out of three facts about how Ara already uses AXI. Very little of it rests on heuristics tuned after the fact.
 
-What I cannot say yet is whether it is a good prefetcher, whether it hides latency in practice and by how much. The logic is verified at the unit level and the integration is structurally sound, but I ran out of term before getting a real program through full system-level simulation. I do not think that undercuts the first part, since the design reasoning in Section 3.4 should hold whatever the eventual numbers say. The project does end with a verified mechanism and no demonstrated speedup.
+What I cannot say yet is whether it is a good prefetcher, whether it hides latency in practice and by how much. What I can now say is that the mechanism passes five targeted unit scenarios, the complete CVA6+Ara executable builds, and Ara's existing strided-load regression passes all 14 cases with the prefetcher integrated. That is evidence of functional correctness at both module and system level. It is not evidence of speedup, because the run has no disabled-prefetcher baseline and no counters showing useful versus wasted speculative traffic.
 
-The thing most worth picking up next is the simulation environment. Everything else in Section 6 sits behind having that running.
+The thing most worth picking up next is therefore measurement, not simulator bring-up. The existing full-system flow is sufficient to begin a controlled baseline comparison; the larger architectural extensions in Section 6 should be driven by those results rather than assumed necessary in advance.
 
 ---
 
