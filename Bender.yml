@@ -56,7 +56,6 @@ sources:
     - hardware/src/vlsu/vstu.sv
     - hardware/src/vlsu/pf_classifier.sv
     - hardware/src/vlsu/pf_predictor.sv
-    - hardware/src/vlsu/pf_throttle.sv
     - hardware/src/vlsu/pf_addr_fifo.sv
     - hardware/src/vlsu/pf_data_buffer.sv
     - hardware/src/vlsu/pf_r_router.sv

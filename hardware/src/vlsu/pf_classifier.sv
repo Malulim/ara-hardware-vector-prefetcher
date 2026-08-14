@@ -9,7 +9,7 @@
 // different element widths must not alias. Computed independently of
 // byte_stride_o so a stride bug can never masquerade as a size bug.
 //
-// is_strided_o: the one extra bit pf_throttle needs -- only VLSE
+// is_strided_o: the one extra bit pf_predictor needs to gate predict_valid_o -- only VLSE
 // predictions become real predictive ARs, VLE stays observe-only. Decoded
 // here, not re-derived downstream, for the same reason as size_o.
 

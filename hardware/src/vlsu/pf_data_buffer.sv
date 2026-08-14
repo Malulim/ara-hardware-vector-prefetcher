@@ -4,7 +4,7 @@
 // against it reports EMPTY, same as an address never requested, and falls
 // through the existing miss path with no extra branch. Counting
 // outstanding predictive ARs (for throttling) is a separate concern --
-// see pf_throttle.sv, which gets it for free from pred_addr_fifo's
+// see prefetch_buffer.sv, which gets it for free from pred_addr_fifo's
 // full_o instead of a second, redundant counter.
 //
 // Entry is {addr, size, data, state}, not just {addr, data, state}: a hit

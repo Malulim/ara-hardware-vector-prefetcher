@@ -16,10 +16,13 @@
 // NO_PRED -> TRANSIENT -> STEADY (saturating); a miss drops straight back
 // to NO_PRED from either state and pulses mispredict_o for one cycle.
 // predict_valid_o only asserts once the *new* state (conf_d) is
-// TRANSIENT or STEADY. address/size/is_strided are still latched every
-// new_insn regardless of confidence, both as next time's comparison
-// basis and so pf_throttle sees a consistent is_strided alongside
-// whatever address eventually does go valid.
+// TRANSIENT or STEADY, *and* the prediction is strided -- v1 scope only
+// ever turns strided (VLSE) predictions into real predictive ARs, VLE
+// stays observe-only (still runs the confidence FSM below, for future
+// reference, but never reaches predict_valid_o). address/size/is_strided
+// are still latched every new_insn regardless of confidence, both as
+// next time's comparison basis and so a consistent is_strided sits
+// alongside whatever address eventually does go valid.
 //
 // Holds at most one pending prediction via a valid/ready handshake (the
 // 1-deep skid register pf_rob's AR arbitration assumes its caller has):
@@ -87,7 +90,14 @@ module pf_predictor import pf_pkg::*; #(
   size_t pending_size_q;
   logic  pending_is_strided_q;
 
-  assign predict_valid_o        = pending_valid_q;
+  // v1 scope: only strided (VLSE) predictions ever become a real
+  // predictive AR (formerly pf_throttle's job, folded in here). A
+  // non-strided pending_valid_q can sit at 1 across cycles where
+  // predict_ready_i never comes -- harmless, since predicted_addr_o for a
+  // pending_is_strided_q=0 entry is never sampled downstream (masked out
+  // by predict_valid_o below) and the next new_insn unconditionally
+  // overwrites pending_* regardless of whether this one ever cleared.
+  assign predict_valid_o        = pending_valid_q && pending_is_strided_q;
   assign predicted_addr_o       = pending_addr_q;
   assign predicted_size_o       = pending_size_q;
   assign predicted_is_strided_o = pending_is_strided_q;
@@ -139,7 +149,7 @@ module pf_predictor import pf_pkg::*; #(
         last_id_q            <= pe_req_i.id;
         last_id_valid_q       <= 1'b1;
         // Latched regardless of conf_d: this is both the comparison basis
-        // for next time's was_correct check, and what throttle sees
+        // for next time's was_correct check, and what downstream sees
         // alongside predict_valid_o whenever it does go valid.
         pending_addr_q        <= addr_t'(predicted_addr_wide);
         pending_size_q        <= size_i;

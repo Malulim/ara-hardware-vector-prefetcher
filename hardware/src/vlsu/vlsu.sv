@@ -40,10 +40,10 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
     // Coherency: CVA6's own AW stream, snooped pre-mux -- see
     // prefetch_buffer.sv's header comment for why the prefetcher needs
     // this on top of Ara's own axi_inval_filter.sv coverage.
-    input  logic                    cva6_st_valid_i,
-    input  logic      [AxiAddrWidth-1:0] cva6_st_addr_i,
-    input  axi_pkg::len_t           cva6_st_len_i,
-    input  axi_pkg::size_t          cva6_st_size_i,
+    input  logic                    cva6_inval_valid_i,
+    input  logic      [AxiAddrWidth-1:0] cva6_inval_addr_i,
+    input  axi_pkg::len_t           cva6_inval_len_i,
+    input  axi_pkg::size_t          cva6_inval_size_i,
     // Interface with the dispatcher
     input  logic                    core_st_pending_i,
     output logic                    load_complete_o,
@@ -266,10 +266,10 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
     .axi_r_valid_o (pf_axi_r_valid   ),
     .axi_r_ready_i (pf_axi_r_ready   ),
     // Coherency: see this module's own port comment.
-    .cva6_st_valid_i(cva6_st_valid_i ),
-    .cva6_st_addr_i (cva6_st_addr_i  ),
-    .cva6_st_len_i  (cva6_st_len_i   ),
-    .cva6_st_size_i (cva6_st_size_i  )
+    .cva6_inval_valid_i(cva6_inval_valid_i ),
+    .cva6_inval_addr_i (cva6_inval_addr_i  ),
+    .cva6_inval_len_i  (cva6_inval_len_i   ),
+    .cva6_inval_size_i (cva6_inval_size_i  )
   );
 
   ////////////////////////

@@ -200,14 +200,14 @@ module ara_system import axi_pkg::*; import ara_pkg::*; #(
   // interconnect side of the handshake, not the eventual B response) --
   // see prefetch_buffer.sv's header comment for why Ara needs this on top
   // of the existing ARA->CVA6 direction.
-  logic                    cva6_st_valid;
-  logic [AxiAddrWidth-1:0] cva6_st_addr;
-  axi_pkg::len_t           cva6_st_len;
-  axi_pkg::size_t          cva6_st_size;
-  assign cva6_st_valid = ariane_axi_req.aw_valid && ariane_axi_resp.aw_ready;
-  assign cva6_st_addr  = ariane_axi_req.aw.addr;
-  assign cva6_st_len   = ariane_axi_req.aw.len;
-  assign cva6_st_size  = ariane_axi_req.aw.size;
+  logic                    cva6_inval_valid;
+  logic [AxiAddrWidth-1:0] cva6_inval_addr;
+  axi_pkg::len_t           cva6_inval_len;
+  axi_pkg::size_t          cva6_inval_size;
+  assign cva6_inval_valid = ariane_axi_req.aw_valid && ariane_axi_resp.aw_ready;
+  assign cva6_inval_addr  = ariane_axi_req.aw.addr;
+  assign cva6_inval_len   = ariane_axi_req.aw.len;
+  assign cva6_inval_size  = ariane_axi_req.aw.size;
 
   axi_inval_filter #(
     .MaxTxns    (4                              ),
@@ -272,10 +272,10 @@ module ara_system import axi_pkg::*; import ara_pkg::*; #(
     .acc_resp_o      (acc_resp      ),
     .axi_req_o       (ara_axi_req   ),
     .axi_resp_i      (ara_axi_resp  ),
-    .cva6_st_valid_i (cva6_st_valid ),
-    .cva6_st_addr_i  (cva6_st_addr  ),
-    .cva6_st_len_i   (cva6_st_len   ),
-    .cva6_st_size_i  (cva6_st_size  )
+    .cva6_inval_valid_i (cva6_inval_valid ),
+    .cva6_inval_addr_i  (cva6_inval_addr  ),
+    .cva6_inval_len_i   (cva6_inval_len   ),
+    .cva6_inval_size_i  (cva6_inval_size  )
   );
 
   axi_mux #(

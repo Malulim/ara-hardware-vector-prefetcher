@@ -1,16 +1,15 @@
 // Sits on Ara's AR/R load path, between the address generator and the AXI
 // cut. Pure module-to-module wiring, no decision logic of its own -- the
 // actual behavior lives in pf_classifier.sv, pf_predictor.sv,
-// pf_throttle.sv, pf_addr_fifo.sv, pf_rob.sv, pf_r_router.sv and
-// pf_data_buffer.sv.
+// pf_addr_fifo.sv, pf_rob.sv, pf_r_router.sv and pf_data_buffer.sv.
 //
 // classifier + predictor run for every VLE/VLSE instruction observed on
 // pe_req_i, which is wired in separately from (not derived from) the AR/R
 // traffic below -- stride/EEW/vl live only in the instruction, never on
 // the AXI channels. predictor's confidence FSM decides *whether* a given
-// instruction's prediction is trusted enough to offer downstream at all;
-// throttle then additionally only lets strided (VLSE) predictions become
-// real predictive ARs -- VLE still builds confidence-FSM state for
+// instruction's prediction is trusted enough to offer downstream at all,
+// and additionally only lets strided (VLSE) predictions become real
+// predictive ARs -- VLE still builds confidence-FSM state for
 // future reference but never reaches the AXI bus. A hit is
 // only ever recognized for a single-beat (len=0) request whose {addr,
 // size} both match a cached entry, since the buffer caches one beat per
@@ -75,10 +74,10 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     // in-flight address tracker need their own inval port -- see
     // pf_addr_fifo.sv's header comment for the race that leaves open if
     // only pf_data_buffer is covered.
-    input  logic          cva6_st_valid_i,
-    input  addr_t         cva6_st_addr_i,
-    input  axi_pkg::len_t cva6_st_len_i,
-    input  size_t         cva6_st_size_i
+    input  logic          cva6_inval_valid_i,
+    input  addr_t         cva6_inval_addr_i,
+    input  axi_pkg::len_t cva6_inval_len_i,
+    input  size_t         cva6_inval_size_i
   );
 
   // Driven by predictor's mispredict_o below. Deliberately reaches only
@@ -144,20 +143,12 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
 
   assign flush = mispredict;
 
-  // ---------------------------------------------------------------------
-  // Throttle. v1 scope -- only strided predictions ever become a real
-  // predictive AR; the "distance N" / in-flight-cap M simplifications
-  // are documented in pf_throttle.sv's own header.
-  // ---------------------------------------------------------------------
-  logic pred_valid_gated, pred_ready_gated;
-
-  pf_throttle i_pf_throttle (
-    .predict_valid_i       (predict_valid       ),
-    .predicted_is_strided_i(predicted_is_strided),
-    .predict_valid_o       (pred_valid_gated    ),
-    .predict_ready_o       (predict_ready       ),
-    .predict_ready_i       (pred_ready_gated    )
-  );
+  // Throttling (v1 scope: only strided predictions ever become a real
+  // predictive AR) now happens inside pf_predictor itself -- see its
+  // predict_valid_o. No separate in-flight counter (distance N / cap M)
+  // here either -- M is already enforced by pred_addr_fifo_full_i's
+  // occupancy below. Add one only if M needs to differ from that FIFO's
+  // depth.
 
   // Package the predicted address into a real, single-beat AXI AR with
   // id=1. size comes from the predictor's forwarded classification, not a
@@ -199,10 +190,10 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .pop_size_o    (pred_addr_fifo_size_out),
     .pop_poisoned_o(pred_addr_fifo_poisoned),
     .empty_o       (/* unused */          ),
-    .inval_valid_i (cva6_st_valid_i        ),
-    .inval_addr_i  (cva6_st_addr_i         ),
-    .inval_len_i   (cva6_st_len_i          ),
-    .inval_size_i  (cva6_st_size_i         )
+    .inval_valid_i (cva6_inval_valid_i        ),
+    .inval_addr_i  (cva6_inval_addr_i         ),
+    .inval_len_i   (cva6_inval_len_i          ),
+    .inval_size_i  (cva6_inval_size_i         )
   );
 
   // ---------------------------------------------------------------------
@@ -234,8 +225,8 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .axi_ar_valid_i       (axi_ar_valid_i     ),
     .axi_ar_ready_o       (axi_ar_ready_o     ),
     .pred_ar_i            (pred_ar            ),
-    .pred_ar_valid_i      (pred_valid_gated   ),
-    .pred_ar_ready_o      (pred_ready_gated   ),
+    .pred_ar_valid_i      (predict_valid      ),
+    .pred_ar_ready_o      (predict_ready      ),
     .pred_ar_fire_o       (pred_addr_fifo_push),
     .pred_addr_fifo_full_i(pred_addr_fifo_full),
     .axi_ar_o             (axi_ar_o           ),
@@ -304,10 +295,10 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .fill_addr_i   (fill_addr   ),
     .fill_size_i   (fill_size   ),
     .fill_data_i   (fill_data   ),
-    .inval_valid_i (cva6_st_valid_i),
-    .inval_addr_i  (cva6_st_addr_i ),
-    .inval_len_i   (cva6_st_len_i  ),
-    .inval_size_i  (cva6_st_size_i )
+    .inval_valid_i (cva6_inval_valid_i),
+    .inval_addr_i  (cva6_inval_addr_i ),
+    .inval_len_i   (cva6_inval_len_i  ),
+    .inval_size_i  (cva6_inval_size_i )
   );
 
 endmodule : prefetch_buffer

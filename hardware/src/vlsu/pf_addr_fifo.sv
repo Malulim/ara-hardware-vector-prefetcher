@@ -3,7 +3,7 @@
 // predictive AR, in issue order, until its R beat arrives.
 //
 // Pure FIFO semantics: pop order equals push order. When to push/pop is
-// the caller's job (pf_throttle on push, pf_r_router on pop), kept
+// the caller's job (pf_predictor on push, pf_r_router on pop), kept
 // separate so a bug in "is this a real pop opportunity" can't be confused
 // with a bug in "did the FIFO preserve order."
 //
