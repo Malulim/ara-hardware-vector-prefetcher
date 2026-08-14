@@ -1,13 +1,11 @@
-# A Hardware Prefetcher for Ara's Vector Load/Store Unit
+# A Hardware Prefetcher for Vector Loads in Ara's VLSU
 
-**ECE 499 Engineering Project, Final Report (DRAFT for review, not yet final)**
+**ECE 499 Engineering Project, Final Report**
 
 **Student:** Catherine Ye
 **Supervisor:** Professor Hiren Patel
 **Term:** Spring 2026
-**Branch:** `caz/dev`, ARA fork (`Malulim/ara-hardware-vector-prefetcher`)
-
-> **Note to self before finalizing:** page count still needs checking against the 25-page cap once this is rendered.
+**Date:** August 14, 2026
 
 ---
 
@@ -40,7 +38,7 @@ The implementation adds seven SystemVerilog modules. Five directed unit scenario
    4.2 System Integration
    4.3 Full-System Functional Simulation
 5. Results
-6. Limitations and Future Work
+6. Limitations, Recommendations and Future Work
    6.1 Performance Evaluation
    6.2 Architecture Extensions
 7. Conclusion
@@ -300,7 +298,7 @@ I did not evaluate performance in this project. A useful comparison would run re
 
 ---
 
-## 6. Limitations and Future Work
+## 6. Limitations, Recommendations and Future Work
 
 ### 6.1 Performance Evaluation
 
