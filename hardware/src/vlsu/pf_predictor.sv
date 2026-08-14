@@ -55,9 +55,10 @@ module pf_predictor import pf_pkg::*; #(
     output logic    predicted_is_strided_o,
 
     // Pulses for one cycle the same cycle a mispredict is detected --
-    // wired by prefetch_buffer.sv into flushing the predictive-side state
-    // (pf_addr_fifo, pf_data_buffer). Deliberately NOT wired to pf_rob:
-    // pf_rob also tracks real in-flight misses that have nothing to do
+    // wired by prefetch_buffer.sv into flushing resident prefetched data.
+    // Deliberately NOT wired to pf_addr_fifo or pf_rob: the FIFO tracks
+    // predictive requests that have already left, while the ROB tracks
+    // real in-flight misses that have nothing to do
     // with whether this stride guess panned out, and clearing its slots
     // out from under an outstanding real AR would desync it from a real R
     // that is still going to arrive on the bus.

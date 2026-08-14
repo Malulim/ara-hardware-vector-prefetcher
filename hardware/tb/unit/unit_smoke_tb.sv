@@ -8,10 +8,10 @@
 //
 // Deliberately does not pull in ara_pkg/axi_pkg or any other ARA type --
 // pf_rob/pf_data_buffer's ports are all `parameter type`, so a minimal
-// local ar_t/r_t is enough to drive them standalone. classifier/predictor/
-// throttle/r_router/addr_fifo are not exercised here (each is either pure
-// combinational or a thin wrapper around a proven common_cells FIFO; the
-// ROB+buffer pair is where an actual bug would hide).
+// local ar_t/r_t is enough to drive them standalone. The classifier,
+// predictor and response router are not exercised here. The address FIFO
+// is instantiated separately below for the in-flight coherency case; the
+// ROB+buffer pair remains the main integrated DUT.
 //
 // Also exercises both halves of the coherency mechanism. step5 drives
 // pf_data_buffer.sv's inval_* port: a simulated CVA6 store overlapping a

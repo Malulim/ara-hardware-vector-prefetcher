@@ -25,6 +25,10 @@ module pf_data_buffer import pf_pkg::*; #(
   ) (
     input  logic clk_i,
     input  logic rst_ni,
+    // A predictor mismatch discards resident guesses. This is a cleanup
+    // policy, not a correctness requirement: lookup still requires an
+    // exact {addr, size} match. In-flight metadata is deliberately kept
+    // in pf_addr_fifo until the corresponding R response returns.
     input  logic flush_i,
 
     // Lookup: queried by pf_rob for every incoming real AR.

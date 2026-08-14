@@ -7,21 +7,21 @@
 **Term:** Spring 2026
 **Branch:** `caz/dev`, ARA fork (`Malulim/ara-hardware-vector-prefetcher`)
 
-> **Note to self before finalizing:** page count still needs checking against the 25-page cap once this is rendered. Anything in *italics* still needs a decision from you.
+> **Note to self before finalizing:** page count still needs checking against the 25-page cap once this is rendered.
 
 ---
 
 ## Summary
 
-Ara is an open-source RISC-V vector coprocessor. Its vector load/store unit (VLSU) issues every AXI memory request under one fixed transaction ID, then leans on AXI4's per-ID ordering rule to keep data arriving at the vector load unit (vldu) in program order. This project adds a hardware prefetcher to that load path.
+Ara is an open-source RISC-V vector coprocessor. Its vector load/store unit (VLSU) sends every AXI memory request with the same transaction ID. AXI4's per-ID ordering rule keeps the responses arriving at the vector load unit (vldu) in program order. I added a hardware prefetcher to this load path.
 
-The idea is specific to RISC-V Vector (RVV) code. A conventional CPU prefetcher works the stride out from a history of addresses it has watched go past. An RVV load instruction states its own access pattern, so the classifier can read the current instruction's stride directly instead of inferring it from address history. The predictor then decides whether a later vector load will continue that pattern.
+Most CPU prefetchers infer a stride from earlier addresses. A RISC-V Vector (RVV) load already describes its access pattern. The classifier can read the stride from the instruction, leaving the predictor to decide whether a later load will continue it.
 
-The prefetcher observes PE requests entering the VLSU, classifies each vector load and predicts where a later load continuing the same pattern would start. A saturating confidence counter decides whether to trust that continuation. Each qualifying strided-load instruction can trigger one speculative AXI read for the next predicted base address, allowing the fetch to begin before that later load's real memory request exists. Strided loads are the case worth going after, since a unit-stride burst already amortises its round trip across the whole burst. Results land in a small buffer. A reorder buffer at the real-request point keeps a speculative hit from being released ahead of an older real miss that is still outstanding, which is the one property the design cannot afford to get wrong.
+The prefetcher watches PE requests entering the VLSU. It classifies each vector load and predicts the next base for a continuing pattern. A three-state confidence FSM controls when the prediction can be used. Once confidence rises, a strided load may issue one speculative AXI read before the later load produces its real request. I limited this path to strided loads because unit-stride loads already use bursts. Returned data waits in a small buffer. A reorder buffer stops a ready hit from passing an older miss.
 
-Holding data in that buffer creates a coherency problem the baseline never had, since baseline Ara caches nothing. If CVA6 writes to an address the prefetcher already fetched, the buffered value goes stale, and software synchronisation cannot fix it, because the read has already happened. The prefetcher therefore watches CVA6's store addresses. It clears any matching buffer entry, and poisons the entry instead if the fetch is still in flight.
+The buffer introduces a coherency problem because baseline Ara keeps no local memory copy. A CVA6 store can make prefetched data stale before software synchronisation takes effect. The prefetcher watches CVA6 store addresses to catch this case. It clears matching resident data, and it poisons a matching in-flight fetch so the response is dropped when it returns.
 
-The implementation is seven new SystemVerilog modules. Five directed unit-level tests cover the ordering property and both halves of the coherency path. The full CVA6+Ara system also builds and links as a Verilator executable, loads a real RVV ELF, and passes all 14 cases in Ara's existing strided-load (`vls`) regression. These results establish local correctness and full-system functional integration. They do not yet establish that the prefetcher improves performance, since no prefetch-hit, bandwidth or baseline cycle measurements have been taken.
+The implementation adds seven SystemVerilog modules. Five directed unit scenarios exercise ordering and the resident and in-flight coherency cases. The complete CVA6+Ara model builds as a Verilator executable, loads a real RVV ELF, and passes all 14 cases in Ara's existing strided-load (`vls`) regression. This is functional evidence. It does not show a speedup because the design has no prefetch-hit or bandwidth counters and no representative enabled/disabled benchmark yet.
 
 ---
 
@@ -41,29 +41,30 @@ The implementation is seven new SystemVerilog modules. Five directed unit-level 
    4.3 Full-System Functional Simulation
 5. Results
 6. Limitations and Future Work
+   6.1 Performance Evaluation
+   6.2 Architecture Extensions
 7. Conclusion
-Cost Comparison
 References
 
 ---
 
 ## 1. Introduction
 
-Ara [1] is an open-source vector coprocessor implementing the RISC-V Vector (RVV) extension. It runs alongside the CVA6 [2] scalar core. The L2 SRAM model answers in one cycle, but a load takes longer than that to come back. Most of the extra time goes to the AXI cuts and the interconnect between the VLSU and memory, and the round trip stays roughly the same whatever the access pattern is. *(Design work used a working figure of about 7 cycles. That number needs measuring before it goes in the final report, and Section 5.3 leans on it.)* If the access pattern is known ahead of time, that latency looks worth hiding.
+Ara [1] is an open-source vector coprocessor that runs beside the CVA6 [2] scalar core. In this simulation, the L2 SRAM model answers in one cycle. AXI cuts and the interconnect still add delay between the VLSU and memory. If the access pattern is known early, a prefetcher may hide part of that delay.
 
-Conventional CPU prefetchers work the stride out themselves, from a history of addresses they have already seen. IP-stride prefetchers and SPP [3] both do this. RVV removes that classification step: `vle` is unit-stride, and `vlse` is strided and names its stride in a scalar register. The predictor uses that information to test whether a future instruction continues the pattern. This project asks what the instruction-provided information is worth, and builds a prefetcher inside Ara's VLSU to find out.
+Conventional CPU prefetchers derive a stride from earlier addresses. IP-stride prefetchers and SPP [3] follow that approach. RVV already identifies `vle` as unit-stride, while `vlse` carries its stride in a scalar register. This project uses those instruction fields in a prefetcher inside Ara's VLSU.
 
 ---
 
 ## 2. Background: How Ara's Memory Path Works
 
-Three properties of Ara's existing VLSU had to be pinned down from source (`addrgen.sv`, `vlsu.sv`, `vldu.sv`, `vstu.sv`) before any design work started. Each one limits what a prefetcher can do.
+Before starting the design, I traced Ara's memory path through `addrgen.sv`, `vlsu.sv`, `vldu.sv` and `vstu.sv`. Three details shaped the prefetcher.
 
-**Every AXI request Ara issues uses transaction ID 0.** Three separate places build an AR packet, for unit-stride, strided and indexed accesses. All three fill it with `default: '0` and never set `id`. Ara therefore depends completely on AXI4's rule that requests sharing an ID come back in order. It does no tagging and no reordering of its own, and `vldu` has neither a reorder buffer nor an ID-indexed scoreboard. Anything a prefetcher hands back to `vldu` has to arrive in the order the real requests went out.
+**Every AXI request Ara issues uses transaction ID 0.** Unit-stride, strided and indexed accesses build their AR packets in three different places. Each packet starts from `default: '0'`, and none of those paths sets `id`. Ara relies on AXI4 to return requests with the same ID in order. It has no request tags or internal reordering at this point. `vldu` also has no reorder buffer or ID-indexed scoreboard. The prefetcher must preserve the issue order seen by `vldu`.
 
 **`vldu` gets addresses from a side metadata queue, never from the R channel.** The same cycle `addrgen` issues an AR or AW, it pushes `{addr, size, len, is_load, is_exception}` into a shared `fifo_v3`. `vldu` and `vstu` take the head entry, one or the other. When R data arrives, `vldu` reads only `axi_r_i.data`, and it gets the address and width for the valid byte window from the metadata queue head. Nothing in the file reads `axi_r_i.id` or `axi_r_i.resp`. The queue stays lined up on its own as long as R order matches AR issue order, so a prefetcher can leave it alone.
 
-**The AXI4 R channel carries no address.** It has `id`, `data`, `resp`, `last` and `user`. AXI matches a returning beat to its request through strict per-ID ordering, with no explicit tag. That is a deliberate simplification in the protocol, and it pushes the bookkeeping onto whoever needs to know an address. Ara's mainline code never has to ask, since everything is `id=0` and order is trusted. A prefetcher does need the address of a returning beat, for buffering and tag comparison, so it has to keep that record itself.
+**The AXI4 R channel carries no address.** It has `id`, `data`, `resp`, `last` and `user`. AXI matches a returning beat through per-ID ordering. Ara can rely on this because its traffic uses `id=0`. The prefetcher still needs the address so it can tag buffered data. It must record that address when the speculative request leaves.
 
 ---
 
@@ -71,15 +72,15 @@ Three properties of Ara's existing VLSU had to be pinned down from source (`addr
 
 ### 3.1 Scope and Constraints
 
-The design covers `vle` and `vlse`, unit-stride and strided loads. Indexed loads (`vlxe`) are out of scope, since their addresses live in a vector register and only exist at runtime. Stores are never prefetched.
+The classifier and predictor recognize `vle` and `vlse`, which represent unit-stride and strided loads. Only `vlse` can issue a speculative AXI request in the current design. Indexed loads (`vlxe`) are out of scope because their addresses live in a vector register and only exist at runtime. Stores are never prefetched.
 
-The classifier also rejects segment loads (`vlseg`) on opcode, though that exclusion is thinner than it looks. `segment_sequencer.sv` rewrites a unit-stride segment load into a run of `VLSE` micro-ops before the VLSU ever sees it, so they reach the prefetcher as ordinary strided loads. That seems safe enough, since each micro-op carries a real base address and a real stride, and a prefetch against one asks for memory the program is about to read anyway. Whether it helps or just wastes bandwidth needs the benchmarks in Section 6.
+Segment loads need separate attention. Ara carries the segment count in `nf`, while the backend operation remains `VLE` or `VLSE`. The classifier sees that operation after `segment_sequencer.sv` breaks the load into micro-ops, so segment-derived micro-ops follow the normal classification. Each strided micro-op has a concrete base and stride. Benchmarks are still needed to tell whether prefetching these operations helps.
 
-Within that scope, only strided loads produce real speculative AXI reads. A new qualifying PE request is the trigger: once confidence has been established, that instruction can produce one read for the next predicted base. The classifier and predictor still run for unit-stride loads, in an observe-only mode that Section 3.4 explains. Coherency between CVA6 stores and the prefetch buffer is in scope, and Section 3.5 covers it.
+Only strided loads produce speculative AXI reads. The predictor uses the PE instruction ID to recognize a new request without firing again while that request is held. Once confidence has been established, a qualifying instruction can produce one read for the predicted base. Unit-stride loads still update the classifier and predictor but do not reach the speculative AR channel. Section 3.5 covers coherency with CVA6 stores.
 
 ### 3.2 Architecture
 
-The prefetcher is one new module, `prefetch_buffer.sv`, dropped onto Ara's AR/R load path between `addrgen` and the AXI cut. It leaves `addrgen.sv`, `vstu.sv` and the shared metadata FIFO alone. `vldu` has no idea it is there, which was a deliberate choice. Figure 1 puts it in system context, next to the baseline it sits on top of.
+`prefetch_buffer.sv` sits between `addrgen` and the AXI cut. The integration leaves `addrgen.sv`, `vstu.sv`, `vldu.sv` and the shared metadata FIFO unchanged. Figure 1 shows this placement.
 
 **Figure 1: System-level block diagram, before and after.** Panel (a) is baseline Ara. Panel (b) adds this project's contribution, the shaded block. Everything else is existing Ara and CVA6 infrastructure. Only the channels each block acts on are drawn, so `axi_inval_filter` appears on the store path alone, even though Ara's other AXI channels physically pass through it untouched.
 
@@ -147,15 +148,15 @@ flowchart TB
     class COREB,L1DB,AINVB,AGB,VLDB,VSTB,L2B existing
 ```
 
-The two panels differ by one block and one edge. Baseline Ara keeps no copy of memory anywhere, so only one invalidation direction exists, and `axi_inval_filter` provides it. That block is easy to misread. It is not a CVA6 block. It sits in Ara's own write path, watches Ara's AW, and hands each store address to CVA6 so CVA6 can drop the matching line from its L1. The cache it protects belongs to CVA6, and Ara has none of its own to protect.
+Baseline Ara keeps no local copy of memory, so it needs only one invalidation direction. `axi_inval_filter` sits in Ara's write path and watches Ara's AW channel. It sends each accepted store address to CVA6, which drops the matching L1 line. The module belongs to Ara's path even though it protects CVA6's cache.
 
-`prefetch_buffer.sv` puts a copy of memory inside Ara for the first time, and that creates the second direction. A CVA6 store now has to reach into Ara as well. The dashed edge in panel (b) carries it, and Section 3.5 covers what the two structures inside the block do once it arrives.
+`prefetch_buffer.sv` adds a local copy inside Ara, which requires the second invalidation direction shown in panel (b). Section 3.5 explains how the buffer handles a snooped CVA6 store.
 
 ### 3.3 Module Breakdown
 
-Figure 2 opens up the shaded block. Seven modules sit inside it, in three groups. A prediction chain turns an instruction into a candidate address. A single arbitration core owns the shared AR channel and the release order to `vldu`. A demux stage files returning R data by ID. The table below gives each module's responsibility.
+Figure 2 expands the shaded block. The classifier and predictor produce a candidate address. `pf_rob` owns the shared AR channel and the release order to `vldu`, while `pf_r_router` separates returning data by ID. The remaining modules hold speculative addresses and data.
 
-**Figure 2: Inside `prefetch_buffer.sv`.** All seven modules shown are this project's contribution. The grey blocks are ports crossing the module boundary, not hardware. Real traffic carries `id = 0` and speculative traffic carries `id = 1`. The two merge onto one physical AR channel at `pf_rob` and split apart again at `pf_r_router`, and that ID is the only thing telling them apart on the way back. Line colour groups the traffic: black is the main request and data flow, purple the buffer lookup, green the speculative-side bookkeeping, blue the mispredict flush, orange the coherency invalidation.
+**Figure 2: Inside `prefetch_buffer.sv`.** The seven modules are new. Grey blocks mark external ports. Real traffic uses `id = 0`; speculative traffic uses `id = 1`. `pf_rob` merges them onto one AR channel, and `pf_r_router` separates the returning data. The line colours distinguish the main data flow, buffer lookup, speculative bookkeeping, mispredict flush and coherency invalidation.
 
 ```mermaid
 flowchart LR
@@ -216,10 +217,10 @@ flowchart LR
 | Module | Responsibility |
 |---|---|
 | `prefetch_buffer.sv` | The top level, and the only module `vlsu.sv` instantiates. Wiring only, with no decision logic of its own. It instantiates the six below, packages a granted prediction into a single-beat AR with `id = 1`, and fans the CVA6 store snoop out to the two structures that hold copies of memory. |
-| `pf_classifier.sv` | Decodes `vle` and `vlse` into `{prefetchable, byte_stride, size, is_strided}` straight from the instruction fields. RVV encodes the pattern, so nothing has to be inferred. Everything else, including indexed loads, segment opcodes and all stores, falls through as not prefetchable. |
+| `pf_classifier.sv` | Decodes `vle` and `vlse` into `{prefetchable, byte_stride, size, is_strided}` straight from the instruction fields. RVV encodes the pattern, so nothing has to be inferred. Indexed loads and stores fall through as not prefetchable. Segment-derived micro-ops are classified according to the `VLE` or `VLSE` operation they carry, as Section 3.1 explains. |
 | `pf_predictor.sv` | Predicts the next instruction's base address as `scalar_op + vl × byte_stride`. One formula covers both `vle` and `vlse`, since the classifier already supplies `byte_stride`. A 2-bit saturating confidence FSM gates the output: `NO_PRED → TRANSIENT → STEADY`, and one mispredict drops it straight back to `NO_PRED`. Only strided predictions get past that gate (Section 3.4). Unit-stride ones still update the FSM, then get dropped here and never reach the AR channel. |
 | `pf_addr_fifo.sv` | Records `{addr, size}` for every outstanding speculative AR, in issue order, since AXI's R channel does not echo the address back. Its occupancy doubles as the throttle. A full FIFO withholds the grant for the next speculative AR, so no separate in-flight counter is needed. |
-| `pf_rob.sv` | The correctness-critical module. It arbitrates real against speculative AR for the shared AR channel, where real traffic always wins. It then releases R data to `vldu` strictly in the order the real ARs went out. How a request resolved, by buffer hit or by real miss, makes no difference to when it is released. |
+| `pf_rob.sv` | The correctness-critical module. It arbitrates real misses against speculative ARs for the shared AR channel, and a real miss always wins. A buffer hit uses no AR bandwidth, so a speculative request may issue in the same cycle. The ROB releases R data to `vldu` strictly in the order the real requests arrived. How a request resolved, by buffer hit or by real miss, makes no difference to when it is released. |
 | `pf_r_router.sv` | Splits returning R data by ID. A speculative result whose `resp` is not `OKAY` gets dropped instead of cached. It routes on `id == 1` and treats everything else as real traffic, which works because this design adds the only second ID in the system. |
 | `pf_data_buffer.sv` | A small fully-associative cache of speculative results, keyed on `{addr, size}`. Keying on `addr` alone would let a wider access hit an entry cached for a narrower one, handing back bytes that were never fetched. Depth is a parameter, currently 4. |
 
@@ -227,32 +228,30 @@ flowchart LR
 
 **Prediction is PE-request-triggered and one step ahead.** The first qualifying PE request establishes a candidate for the next base. A later matching request raises confidence and may trigger one speculative AR for the following base, before that following instruction has produced a real AR of its own.
 
-**Only strided loads get real prefetches.** A unit-stride load issues one large burst AR and spreads the round trip across the whole burst, so per element it is already cheap. A strided load issues one small AR per element and pays the full round trip every time, which is where a prefetcher has something to win. The risk is lopsided as well. A wrong unit-stride prefetch throws away a whole burst of bandwidth, while a wrong strided one costs one small request. Taking the bigger risk while the core mechanism was still unproven did not seem worth it. Unit-stride loads still run through the classifier and predictor and still build confidence-FSM state, so the path can be switched on later without redoing that groundwork.
+**Only strided loads issue prefetches.** A unit-stride load uses a burst AR, which spreads the memory round trip over many elements. A strided load sends one small AR per element and pays that round trip repeatedly. A wrong unit-stride prediction also wastes a whole burst, while a wrong strided prediction wastes one small request. I kept unit-stride loads in the classifier and confidence FSM but blocked their speculative ARs.
 
-**The address-tracking FIFO exists because AXI does not report the address back.** This follows straight from Section 2. Without a side record of what was asked for, a returning speculative beat cannot be filed into the data buffer under the right `{addr, size}` key. Its push and pop rhythm copies what `addrgen` and its metadata FIFO already do for the real path, scaled down to the prefetcher's own speculative traffic.
+**The address-tracking FIFO replaces the missing R-channel address.** A returning speculative beat needs the original `{addr, size}` before it can enter the data buffer. AXI does not return that information, so the FIFO records it when the AR request leaves. Its push and pop sequence follows the metadata FIFO that `addrgen` already uses for real traffic.
 
-**The hit key is `{addr, size}`.** `vlse8`, `vlse16`, `vlse32` and `vlse64` all address the same memory and differ only in element width. `size` carries that width, decoded from `vtype.vsew` and independent of the stride. A `vlse32` prefetch cached at address A must not satisfy a later `vlse64` request to A, or the data comes back sized for the wrong element. `size` and `len` are also easy to confuse. `size` is per-beat width, which is what the comparison needs. `len` is burst length, and it is never stored here, since every speculative AR is one beat. That single-beat limit also decides which real requests can hit at all. `pf_rob` only tests the buffer when the incoming real AR has `len == 0`. A multi-beat burst always goes to memory, because one cached beat cannot satisfy it.
+**The hit key is `{addr, size}`.** Element width matters even when two loads use the same address. A `vlse32` entry at address A cannot satisfy a later `vlse64` request to A. The `size` field records this per-beat width. The buffer does not store `len` because every speculative AR contains one beat. For the same reason, `pf_rob` only accepts a buffer hit when the real request has `len == 0`; multi-beat bursts go to memory.
 
-**A reorder buffer, not a plain queue.** A speculative hit can be ready before an older real miss resolves, and a plain FIFO cannot take writes out of order. The ROB takes them in any order. It does not care how a slot became ready, and it releases only from the head. Both paths can then share one release mechanism, with nothing extra needed to reconcile them.
+**The release path uses a reorder buffer.** A speculative hit may become ready while an older real miss is still outstanding. The ROB records either completion and releases data only from the head. Hits and misses use the same release path.
 
-**The buffer has two states, not three.** A third in-flight state would let a real request that collided with an outstanding speculative fetch wait for it instead of re-issuing. But the design re-issues on that collision anyway, so the in-flight state would only ever be read and then handled exactly like `empty`. That is dead weight in a structure whose whole justification is being small enough to compare in parallel in one cycle. Entries are `empty` or `valid`, and one exists only once its data has landed. The de-duplication it would allow is future work (Section 6).
+**Buffer entries use two states.** An entry is `empty` or `valid`. It becomes valid when data arrives. If a real request reaches an address that is still being prefetched, the current design sends another read. A third in-flight state could remove that duplicate request and remains future work.
 
-**A mispredict clears the data buffer, though not because it needs to.** A lookup only ever matches an entry's exact `{addr, size}`, so a stale prediction sitting in the buffer can never be handed out for the wrong address, and every fill overwrites its slot unconditionally regardless of what was there before. Clearing on a mispredict is not required for correctness and does not measurably change the hit rate either. It just discards a specific guess a few cycles earlier than the next fill would have overwritten it anyway. It stays in because it is one cycle of work and matches the intuition that a prediction just proven wrong should not linger, not because leaving it in place would break anything.
-
-**`pf_addr_fifo` is the one structure that genuinely cannot be cleared.** Unlike the data buffer, it is not a cache of finished results. It is a record of requests already sent, in the order they were sent, and a mispredict does not recall bytes already out on the bus. Clearing it would put that record out of step with the bus. The in-flight read still comes back and `pf_r_router` still pops, but the pop now reads whatever entry the reset pointers happen to point at. Real data gets filed under a stale `{addr, size}` key, and a later real load to that address hits it and takes the data as its own, so a load ends up with data belonging to somewhere else entirely. Leaving the FIFO alone costs very little, since a completion arriving after a mispredict fills the buffer under its own correct key and is at worst a useless prefetch. The same reasoning covers the coherency mechanism in Section 3.5, whose poisoned bits live in this FIFO. A mispredict landing between a CVA6 store and the poisoned fetch's return would otherwise wipe them.
+**`pf_addr_fifo` stays intact after a mispredict.** It records requests that have already left the VLSU. Those responses will still return, so clearing the FIFO would break its alignment with the bus. `pf_r_router` would pop the wrong `{addr, size}` and could file returned data under a stale key. A later real load might then consume data from another address. Keeping the FIFO costs little. A late response is stored under its original key and may only become a useless prefetch. The poisoned bits used for coherency also live in this FIFO, so preserving it keeps those bits until the matching response arrives.
 
 ### 3.5 Coherency
 
-Ara already has one coherency mechanism, `axi_inval_filter.sv`, which watches Ara's own store address channel and has CVA6 invalidate the matching L1 line. This project needs the other direction: something has to tell Ara when CVA6 writes to an address Ara has cached.
+`axi_inval_filter.sv` already watches Ara's store addresses and asks CVA6 to invalidate the matching L1 line. The prefetch buffer also needs the reverse path so it can see CVA6 stores.
 
-That need did not exist before this project, since baseline Ara holds no cache and its loads go straight to the bus. A prefetch buffer puts a second copy of memory inside Ara, and software cannot fix a stale copy after the fact. Whatever keeps the baseline correct assumes Ara reads an address at the moment the load runs, and a prefetcher breaks that by reading early and freezing the result. A program can synchronise perfectly and still get handed a value fetched before the store it was waiting on, so CVA6's writes have to reach into the buffer directly.
+Baseline Ara sends loads straight to the bus and keeps no local copy. The prefetch buffer reads early and holds the result. A later CVA6 store can make that result stale, so the hardware must invalidate it directly.
 
 The mechanism snoops CVA6's AXI write-address channel, tapped in `ara_system.sv` after the CVA6-side width converter and before the shared AXI mux. On every accepted CVA6 store it checks two structures:
 
 - **`pf_data_buffer.sv`.** Any resident entry whose byte range overlaps the store's range is cleared that cycle.
 - **`pf_addr_fifo.sv`.** A store can land on an address whose speculative fetch has not returned yet, so no buffer entry exists to clear. This race is real and has to be handled explicitly, since nothing else in the design orders CVA6's stores against Ara's speculative reads. This is why `pf_addr_fifo.sv` uses an explicit indexed array instead of an opaque `fifo_v3` wrapper. A matching in-flight entry gets marked poisoned instead, and when its data eventually arrives, `pf_r_router.sv` drops it.
 
-This snoop runs unconditionally, unlike `axi_inval_filter`, which is gated by a runtime `acc_cons_en` signal. That distinction is deliberate. `acc_cons_en` turns on a consistency mode that orders CVA6 and Ara at instruction granularity, while this snoop deals with the prefetcher having read an address before the instruction that wanted it, which holds regardless of mode. Running it unconditionally probably costs a few dropped prefetches, so it is left ungated.
+The snoop stays active in every mode. `acc_cons_en` gates `axi_inval_filter`, but instruction-level ordering cannot cover data read speculatively ahead of the instruction. An unconditional snoop may discard a usable prefetch, though it avoids leaving stale data in the buffer.
 
 ---
 
@@ -260,7 +259,7 @@ This snoop runs unconditionally, unlike `axi_inval_filter`, which is gated by a 
 
 ### 4.1 Unit-Level Verification
 
-`unit_smoke_tb.sv` drives `pf_rob.sv` and `pf_data_buffer.sv` wired together, plus `pf_addr_fifo.sv` standalone. The first pair owns the one property whose violation would be a genuine correctness bug and not just a slowdown, namely in-order release regardless of hit or miss. Five directed scenarios run against them. `make simv_unit` from `hardware/` builds and runs the testbench directly; each scenario prints its own `[PASS] stepN: ...` line, so a failure shows up as a missing or different line rather than only a changed exit code.
+`unit_smoke_tb.sv` connects `pf_rob.sv` to `pf_data_buffer.sv` and instantiates `pf_addr_fifo.sv` separately. It targets in-order release and coherency, where a bug could return incorrect data without an obvious failure. Running `make simv_unit` from `hardware/` builds and executes five scenarios. Each prints a `[PASS] stepN: ...` line.
 
 - A cold miss forwards correctly.
 - A buffer hit releases without touching the real AXI channel.
@@ -268,23 +267,21 @@ This snoop runs unconditionally, unlike `axi_inval_filter`, which is gated by a 
 - A CVA6 store invalidates a resident buffer entry, so the next access to that address misses instead of returning stale data.
 - A CVA6 store lands on a fetch that is still in flight. It has to poison the one overlapping `pf_addr_fifo` entry and no other, and pop order has to stay equal to push order.
 
-The last scenario covers the second half of the coherency mechanism and holds the invariant behind Section 3.4's flush decision. It instantiates `pf_addr_fifo` on its own, since this testbench has no predictive AR path to reach it through.
+The last scenario covers the in-flight half of the coherency mechanism. It instantiates `pf_addr_fifo` on its own, since this testbench has no predictive AR path to reach it through.
 
-These five scenarios deliberately focus on the ordering and coherency properties most likely to cause silent corruption. They are not intended as exhaustive module coverage. Optional directed coverage beyond this scope is left to Section 6.
+The five scenarios target ordering and coherency. They do not provide exhaustive module coverage.
 
 ### 4.2 System Integration
 
-The full system, CVA6 plus Ara plus the prefetcher and the coherency snoop, elaborates cleanly under Verilator, with no port mismatches, missing connections or type errors. The generated C++ model also compiles and links successfully with the ELF loader and SRAM DPI exports, producing `hardware/build/verilator/Vara_tb_verilator`.
-
-`make verilate` from `hardware/` reproduces this. Verilator's own Verilation Report gives a module count and walltime, with zero elaboration errors. It does emit `%Warning-SELRANGE` on `deps/cva6/core/issue_read_operands.sv` and `ex_stage.sv`, but those are pre-existing CVA6 files this project does not touch, not a sign of a broken connection on the prefetcher's side.
+Running `make verilate` from `hardware/` builds the full system: CVA6, Ara, the prefetcher and the coherency snoop. Verilator elaborates the RTL with no port mismatches, missing connections or type errors. The generated C++ model then compiles and links with the ELF loader and SRAM DPI exports, producing `hardware/build/verilator/Vara_tb_verilator`. The build emits warnings in existing Ara and dependency RTL, but none points to a missing or mismatched prefetcher connection.
 
 ### 4.3 Full-System Functional Simulation
 
-End-to-end system-level simulation was completed with Ara's existing `rv64uv-ara-vls` regression. This is a compiled RVV strided-load ELF, loaded into the simulated SRAM and executed by CVA6 and Ara through the same VLSU path modified by this project. Running `make rv64uv-ara-vls` from `hardware/` executes 14 test cases. All 14 passed, and the testbench terminated with `Core Test *** SUCCESS *** (tohost = 0)` after `0x7cd0` simulated cycles.
+I used Ara's existing `rv64uv-ara-vls` regression for the full-system run. Its compiled RVV ELF is loaded into simulated SRAM and executed by CVA6 and Ara through the modified VLSU. `make rv64uv-ara-vls` runs 14 cases. All passed, and the testbench ended with `Core Test *** SUCCESS *** (tohost = 0)` after `0x7cd0` simulated cycles.
 
-Bringing up this flow exposed a dependency-state issue rather than an RTL issue. Verilator's C++ harness (`dpi_memutil.cc`) calls `simutil_set_mem` and `simutil_memload`, which are DPI-exported by the SRAM patch at `hardware/patches/0001-tech-cells-generic-sram.patch`. A locally modified `Bender.lock` had selected a newer `tech_cells_generic` revision to which that patch no longer applied, leaving both symbols undefined at link time. Restoring the repository's locked dependency revision and running `make apply-patches` supplied the exports. The available `libelf` headers and library then compiled and linked the ELF-loading harness successfully.
+The first link attempt failed because the dependency checkout did not match `Bender.lock`. Verilator's C++ harness (`dpi_memutil.cc`) needs the `simutil_set_mem` and `simutil_memload` DPI exports supplied by `hardware/patches/0001-tech-cells-generic-sram.patch`. The local checkout used a newer `tech_cells_generic` revision, so the patch had not been applied. Restoring the locked revision and running `make apply-patches` supplied both symbols. The installed `libelf` headers and library then linked the ELF loader.
 
-The design therefore has evidence at three levels: directed unit tests for the new ordering and coherency state, structural elaboration and linking of the complete system, and a functional regression running real RVV code. The `vls` result shows that the integrated design preserves architectural correctness for the tested strided-load cases. It does not by itself show how many speculative requests were issued, how often they hit, or whether they reduced execution time.
+The directed tests cover the new ordering and coherency state. The successful `vls` run adds a full-system check with real RVV code. The tested strided loads remain architecturally correct after integration. The run does not count speculative requests or buffer hits, so it gives no evidence of prefetch activity or speedup.
 
 ---
 
@@ -292,34 +289,26 @@ The design therefore has evidence at three levels: directed unit tests for the n
 
 ### 5.1 Verification Results
 
-These are the claims backed by evidence.
-
-- **7 new RTL modules**, integrated into Ara's VLSU with a small footprint in the surrounding code. Three existing files changed. `vlsu.sv` carries both the AR/R path splice and its share of the coherency wiring, while `ara.sv` and `ara_system.sv` only pass the snoop through.
-- **5/5 unit-level scenarios pass.** They exercise the property whose violation would be a silent correctness bug and not just a slowdown: in-order release to `vldu`, whether a request resolved by buffer hit or by real miss. Both halves of the coherency mechanism are covered, a store against a resident entry and a store against a fetch still in flight.
+- **Implementation.** Seven new prefetcher modules share types from `pf_pkg`. Three existing RTL files handle integration: `vlsu.sv` splices the AR/R path and carries the coherency signals, while `ara.sv` and `ara_system.sv` pass the store snoop through. The build files and unit harness include the new modules.
+- **5/5 unit-level scenarios pass.** A hit cannot pass an older miss on the way to `vldu`. The tests also cover a store against resident data and a store against an in-flight fetch.
 - **Full-system executable built.** CVA6 plus Ara plus the prefetcher elaborates, compiles and links under Verilator with the repository's SRAM DPI patch and the ELF-loading harness.
-- **14/14 full-system RVV strided-load cases pass.** Ara's existing `rv64uv-ara-vls` ELF runs through the complete model and reports `Core Test *** SUCCESS *** (tohost = 0)`. This is a regression result using Ara's existing test program and system harness, rather than a new benchmark written for this project.
+- **14/14 full-system RVV strided-load cases pass.** Ara's existing `rv64uv-ara-vls` ELF runs through the complete model and reports `Core Test *** SUCCESS *** (tohost = 0)`. The run reuses Ara's test program and system harness. This project did not add a new benchmark for it.
 
 ### 5.2 Performance
 
-No comparative performance measurement was taken. The `vls` run reports total simulated cycles, but one number with no disabled-prefetcher baseline cannot show a speedup. The present results establish functional correctness, while performance evaluation remains future work in Section 6.
-
-### 5.3 Expected Behavior
-
-Without measurements the design still supports a few predictions, stated here as predictions.
-
-- The prefetcher issues its speculative request one predicted instruction ahead, triggered by the preceding qualifying PE request. Whether that is early enough to hide the round trip depends on two unmeasured numbers, the round trip itself (Section 1) and how far apart consecutive strided vector instructions actually issue. If they issue only a few cycles apart, a one-instruction lookahead may well be too short, and running it would show that straight away.
-- A misprediction clears the whole data buffer, not just the affected entry, while the address FIFO is left alone (Section 3.4). Workloads that switch stride patterns often, say alternating between differently-strided arrays, should pay more for this than a workload holding one stride across a long loop. That is directly testable now that the full-system flow runs.
-- Invalidation in the coherency path is a single-cycle parallel comparison (Section 3.5), where `axi_inval_filter` needs a serialised per-line walk. The coherency path probably will not become a throughput bottleneck. That follows from the buffer being small and fully associative, and not from any measurement.
+I did not evaluate performance in this project. A useful comparison would run representative strided-load workloads with prefetching enabled and disabled, then compare total cycles, prefetch hit rate and extra memory traffic. The `vls` result in Section 5.1 is a correctness result only. Its `0x7cd0` cycle count is not evidence of speedup.
 
 ---
 
 ## 6. Limitations and Future Work
 
-The necessary functional bring-up is complete: the unit tests pass, the full-system executable links, and an existing RVV strided-load regression passes. The remaining work falls into optional verification depth, performance evaluation and architecture extensions.
+### 6.1 Performance Evaluation
 
-- **Optional top-level directed coverage.** A testbench instantiating `prefetch_buffer` and driving a synthetic instruction stream could directly observe the classifier, predictor, confidence FSM, strided-only gate, AR arbitration, mispredict flush and non-`OKAY` speculative-response handling. The present unit tests do not isolate those cases, although the full-system `vls` regression now provides integration-level evidence.
-- **Performance evaluation.** The working full-system flow can now support controlled prefetcher-on versus prefetcher-off experiments. Effective latency reduction, total execution cycles, prefetch hit rate, speculative-request count and wasted bandwidth need instrumentation and representative vector workloads before any speedup claim can be made.
-- **Multi-step lookahead and adaptive prefetch degree.** The present predictor generates at most one new speculative AR from each qualifying PE request. A more aggressive design could use one confirmed pattern to generate several future bases, `A + d`, `A + 2d`, ..., `A + Nd`, where `d = vl × byte_stride`, without waiting for another PE request before each one. The degree `N` could be controlled by confidence, buffer and in-flight occupancy, observed usefulness and available memory bandwidth. This would also require explicit handling for page boundaries, address overflow, cancellation after a pattern change and the extra arbitration pressure on real traffic.
+The full-system flow can now run a controlled prefetcher-on and prefetcher-off comparison. It still needs counters for execution cycles, prefetch hits, speculative requests and wasted bandwidth, along with representative vector workloads.
+
+### 6.2 Architecture Extensions
+
+- **Multi-step lookahead and adaptive prefetch degree.** The current predictor generates at most one speculative AR for each qualifying PE request. A later version could generate `A + d`, `A + 2d`, ..., `A + Nd` from one confirmed pattern, where `d = vl × byte_stride`. Confidence, buffer occupancy and available bandwidth could control `N`. This extension would also need rules for page boundaries, address overflow, cancellation and added AR pressure.
 - **Unit-stride prefetching.** Currently observe-only, for the reasons in Section 3.4. Turning it on needs the burst-granularity redesign that path would require.
 - **In-flight de-duplication.** The three-state buffer design set aside in Section 3.4 stays a reasonable optimization to revisit once the two-state design has been measured against real workloads.
 
@@ -327,35 +316,21 @@ The necessary functional bring-up is complete: the unit tests pass, the full-sys
 
 ## 7. Conclusion
 
-This project started from a narrow question. RVV instructions state their own access pattern, unit-stride or strided with the stride spelled out. Does that let you build a prefetcher that is simpler, and easier to argue correct, than the address-inference designs conventional CPUs use?
+The prefetcher uses RVV instruction fields to classify each access. It only predicts whether a later instruction continues the pattern. Its placement and ordering logic follow Ara's existing AXI path, including the in-order response stream on `id = 0`.
 
-For the mechanism itself I think the answer is yes. The classifier does not guess the current instruction's pattern; only the continuation into a future instruction is speculative. The correctness argument for the core pipeline, meaning the ROB and the data buffer and the address FIFO, comes fairly directly out of three facts about how Ara already uses AXI. Very little of it rests on heuristics tuned after the fact.
+Five directed unit scenarios pass. The complete CVA6+Ara model also builds and passes all 14 cases in Ara's strided-load regression. These checks cover the main ordering and coherency risks, and the tested RVV loads still execute correctly after integration.
 
-What I cannot say yet is whether it is a good prefetcher, whether it hides latency in practice and by how much. What I can now say is that the mechanism passes five targeted unit scenarios, the complete CVA6+Ara executable builds, and Ara's existing strided-load regression passes all 14 cases with the prefetcher integrated. That is evidence of functional correctness at both module and system level. It is not evidence of speedup, because the run has no disabled-prefetcher baseline and no counters showing useful versus wasted speculative traffic.
-
-The thing most worth picking up next is therefore measurement, not simulator bring-up. The existing full-system flow is sufficient to begin a controlled baseline comparison; the larger architectural extensions in Section 6 should be driven by those results rather than assumed necessary in advance.
-
----
-
-## Cost Comparison
-
-| Item | Estimated | Actual |
-|---|---|---|
-| Materials/supplies | $0 | $0 |
-| Computer time | Department-provided (ECE lab servers) | Department-provided |
-| Other | — | — |
-
-*No costs were incurred. This is an RTL and software project running on departmental compute, which matches the course outline's note that students should not face additional costs.*
+The report makes no performance claim. The current evidence has no representative enabled/disabled benchmark and no count of useful or wasted requests. Those measurements should come before the larger extensions in Section 6.
 
 ---
 
 ## References
 
-1. M. Cavalcante, F. Schuiki, F. Zaruba, M. Schaffner, and L. Benini, "Ara: A 1-GHz+ Scalable and Energy-Efficient RISC-V Vector Processor With Multiprecision Floating-Point Support in 22-nm FD-SOI," *IEEE Transactions on Very Large Scale Integration (VLSI) Systems*, vol. 28, no. 2, pp. 530–543, Feb. 2020.
-2. F. Zaruba and L. Benini, "The Cost of Application-Class Processing: Energy and Performance Analysis of a Linux-Ready 1.7-GHz 64-bit RISC-V Core in 22-nm FDSOI Technology," *IEEE Transactions on Very Large Scale Integration (VLSI) Systems*, vol. 27, no. 11, pp. 2629–2640, Nov. 2019.
-3. J. Kim, S. H. Pugsley, P. V. Gratz, A. L. N. Reddy, C. Wilkerson, and Z. Chishti, "Path Confidence based Lookahead Prefetching," in *Proc. 49th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)*, pp. 1–12, Oct. 2016.
-4. pulp-platform, "Ara: A vector processor implementing the RISC-V Vector extension," GitHub repository. [Online]. Available: https://github.com/pulp-platform/ara
-5. OpenHW Group, "CVA6: A 6-stage, single-issue, in-order CPU which implements the 64-bit RISC-V instruction set," GitHub repository. [Online]. Available: https://github.com/openhwgroup/cva6
+1. M. Cavalcante, F. Schuiki, F. Zaruba, M. Schaffner, and L. Benini, "Ara: A 1-GHz+ Scalable and Energy-Efficient RISC-V Vector Processor With Multiprecision Floating-Point Support in 22-nm FD-SOI," *IEEE Transactions on Very Large Scale Integration (VLSI) Systems*, vol. 28, no. 2, pp. 530–543, Feb. 2020, doi: [10.1109/TVLSI.2019.2950087](https://doi.org/10.1109/TVLSI.2019.2950087).
+2. F. Zaruba and L. Benini, "The Cost of Application-Class Processing: Energy and Performance Analysis of a Linux-Ready 1.7-GHz 64-Bit RISC-V Core in 22-nm FDSOI Technology," *IEEE Transactions on Very Large Scale Integration (VLSI) Systems*, vol. 27, no. 11, pp. 2629–2640, Nov. 2019, doi: [10.1109/TVLSI.2019.2926114](https://doi.org/10.1109/TVLSI.2019.2926114).
+3. J. Kim, S. H. Pugsley, P. V. Gratz, A. L. N. Reddy, C. Wilkerson, and Z. Chishti, "Path confidence based lookahead prefetching," in *Proc. 49th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)*, article 60, pp. 60:1–60:12, Oct. 2016, doi: [10.1109/MICRO.2016.7783763](https://doi.org/10.1109/MICRO.2016.7783763).
+4. pulp-platform, "Ara," GitHub repository. [Online]. Available: [https://github.com/pulp-platform/ara](https://github.com/pulp-platform/ara).
+5. OpenHW Group, "CVA6 RISC-V CPU," GitHub repository. [Online]. Available: [https://github.com/openhwgroup/cva6](https://github.com/openhwgroup/cva6).
 
 ---
 

@@ -1,7 +1,9 @@
 // Pattern classification. Purely combinational: RVV gives stride directly
 // in the instruction encoding, so there's nothing to infer here, unlike a
-// classic IP-stride prefetcher. VLE/VLSE are prefetchable; everything else
-// (indexed, segment, all stores) is not.
+// classic IP-stride prefetcher. VLE/VLSE are prefetchable; indexed loads
+// and stores are not. Segment-derived micro-ops are not separately tagged
+// here: Ara's segment sequencer presents them as VLE or VLSE, so they follow
+// the corresponding classification below.
 //
 // size_o mirrors pe_req_i.vtype.vsew (the AXI size encoding Ara's own
 // addrgen already uses) so downstream hit comparisons can check
@@ -43,7 +45,7 @@ module pf_classifier import ara_pkg::*; #(
         size_o         = size_t'(pe_req_i.vtype.vsew);
         is_strided_o   = 1'b1;
       end
-      default: ; // VLXE/VSXE, segment ops, all stores: never prefetched
+      default: ; // Indexed loads and all stores: never prefetched
     endcase
   end
 
