@@ -102,3 +102,4 @@ sources:
       files:
         - hardware/tb/unit/unit_smoke_tb.sv
         - hardware/tb/unit/pf_system_tb.sv
+        - hardware/tb/unit/pf_predictor_tb.sv

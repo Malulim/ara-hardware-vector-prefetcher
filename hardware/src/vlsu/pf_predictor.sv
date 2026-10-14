@@ -24,19 +24,38 @@
 // next time's comparison basis and so a consistent is_strided sits
 // alongside whatever address eventually does go valid.
 //
-// Holds at most one pending prediction via a valid/ready handshake (the
-// 1-deep skid register pf_rob's AR arbitration assumes its caller has):
-// the predictive AR can lose arbitration to real traffic for an unbounded
-// number of cycles, so the prediction must stay live until accepted. If a
-// new qualifying instruction arrives first, the old prediction is simply
-// dropped -- a missed prefetch opportunity, not a correctness bug.
+// Prefetch stream: once a prediction is trusted, the predictor offers a
+// run of addresses, not one. They are the first `degree` element
+// addresses of the *next* instruction: predicted_next_base,
+// + byte_stride, + 2*byte_stride, ... One address is offered at a time
+// over the same valid/ready handshake as before, and the next one appears
+// only after the current one is accepted, so pf_rob still sees a caller
+// that holds one stable address until granted. The predictive AR can lose
+// arbitration to real traffic for an unbounded number of cycles, so the
+// stream simply waits. If a new qualifying instruction arrives before the
+// stream is finished, the rest of it is dropped and replaced: the
+// instruction it was fetching for has arrived, so those fetches would
+// only race its real requests. A missed prefetch opportunity, not a
+// correctness bug.
+//
+// degree = vl when vl <= MaxDegree. A longer instruction gets MaxDegree
+// addresses (ClipWhenLarge = 1) or none at all (ClipWhenLarge = 0).
+// MaxDegree must not exceed what the data buffer can hold on top of the
+// entries the current instruction is still consuming; see
+// prefetch_buffer.sv.
 
 module pf_predictor import pf_pkg::*; #(
     parameter type pe_req_t = logic,
     parameter type stride_t = logic,
     parameter type addr_t   = logic,
     parameter type size_t   = logic,
-    parameter type id_t     = logic
+    parameter type id_t     = logic,
+    // Largest number of predictive addresses offered per instruction.
+    parameter int unsigned MaxDegree     = 16,
+    // vl > MaxDegree: 1 = prefetch the first MaxDegree elements, 0 = none.
+    parameter bit          ClipWhenLarge = 1'b1,
+    // Dependent parameters. DO NOT CHANGE!
+    localparam int unsigned DegWidth = $clog2(MaxDegree + 1)
   ) (
     input  logic    clk_i,
     input  logic    rst_ni,
@@ -86,20 +105,35 @@ module pf_predictor import pf_pkg::*; #(
   logic [127:0] predicted_addr_wide;
   assign predicted_addr_wide = 128'(pe_req_i.scalar_op) + 128'(pe_req_i.vl) * 128'(byte_stride_i);
 
-  logic  pending_valid_q;
+  // pending_addr_q is the comparison basis only: where this instruction
+  // said the next one would start. What actually goes out on the bus is
+  // the stream below.
   addr_t pending_addr_q;
   size_t pending_size_q;
   logic  pending_is_strided_q;
 
-  // v1 scope: only strided (VLSE) predictions ever become a real
-  // predictive AR (formerly pf_throttle's job, folded in here). A
-  // non-strided pending_valid_q can sit at 1 across cycles where
-  // predict_ready_i never comes -- harmless, since predicted_addr_o for a
-  // pending_is_strided_q=0 entry is never sampled downstream (masked out
-  // by predict_valid_o below) and the next new_insn unconditionally
-  // overwrites pending_* regardless of whether this one ever cleared.
-  assign predict_valid_o        = pending_valid_q && pending_is_strided_q;
-  assign predicted_addr_o       = pending_addr_q;
+  // How many addresses this instruction's prediction is worth.
+  logic [DegWidth-1:0] degree;
+  always_comb begin
+    if (pe_req_i.vl == '0)                  degree = '0;
+    else if (pe_req_i.vl <= MaxDegree)      degree = DegWidth'(pe_req_i.vl);
+    else if (ClipWhenLarge)                 degree = DegWidth'(MaxDegree);
+    else                                    degree = '0;
+  end
+
+  // The stream: next address to offer, how many are left, and the step.
+  addr_t               stream_addr_q;
+  stride_t             stream_stride_q;
+  logic [DegWidth-1:0] stream_rem_q;
+
+  logic stream_fire;
+  assign stream_fire = predict_valid_o && predict_ready_i;
+
+  // Only strided (VLSE) predictions ever become a real predictive AR. A
+  // VLE instruction still updates pending_* and the confidence FSM, but
+  // loads an empty stream (see the always_ff below).
+  assign predict_valid_o        = (stream_rem_q != '0);
+  assign predicted_addr_o       = stream_addr_q;
   assign predicted_size_o       = pending_size_q;
   assign predicted_is_strided_o = pending_is_strided_q;
 
@@ -140,25 +174,34 @@ module pf_predictor import pf_pkg::*; #(
     if (!rst_ni) begin
       last_id_q            <= '0;
       last_id_valid_q       <= 1'b0;
-      pending_valid_q       <= 1'b0;
       pending_addr_q        <= '0;
       pending_size_q        <= '0;
       pending_is_strided_q  <= 1'b0;
+      stream_addr_q         <= '0;
+      stream_stride_q       <= '0;
+      stream_rem_q          <= '0;
       conf_q                <= PF_CONF_NO_PRED;
     end else begin
+      // new_insn has priority over stream_fire. If both happen in the same
+      // cycle the address on the output is still accepted by pf_rob (the
+      // handshake completed), and the stream is then replaced.
       if (new_insn) begin
         last_id_q            <= pe_req_i.id;
         last_id_valid_q       <= 1'b1;
-        // Latched regardless of conf_d: this is both the comparison basis
-        // for next time's was_correct check, and what downstream sees
-        // alongside predict_valid_o whenever it does go valid.
+        // Latched regardless of conf_d: this is the comparison basis for
+        // next time's was_correct check.
         pending_addr_q        <= addr_t'(predicted_addr_wide);
         pending_size_q        <= size_i;
         pending_is_strided_q  <= is_strided_i;
-        pending_valid_q       <= (conf_d != PF_CONF_NO_PRED);
         conf_q                <= conf_d;
-      end else if (pending_valid_q && predict_ready_i) begin
-        pending_valid_q <= 1'b0;
+        // Load the stream, or empty it when the prediction is not trusted
+        // or the access is not strided.
+        stream_addr_q         <= addr_t'(predicted_addr_wide);
+        stream_stride_q       <= byte_stride_i;
+        stream_rem_q          <= ((conf_d != PF_CONF_NO_PRED) && is_strided_i) ? degree : '0;
+      end else if (stream_fire) begin
+        stream_addr_q <= stream_addr_q + addr_t'(stream_stride_q);
+        stream_rem_q  <= stream_rem_q - DegWidth'(1);
       end
     end
   end

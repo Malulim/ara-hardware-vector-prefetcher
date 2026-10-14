@@ -33,6 +33,13 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     // Depth of the side FIFO tracking addresses of outstanding predictive
     // ARs -- AXI's R channel never echoes back the request address.
     parameter int  unsigned PredAddrFifoDepth = 4,
+    // Largest number of predictive ARs issued per instruction (see
+    // pf_predictor.sv). The data buffer replaces entries round-robin and
+    // does not free an entry on a hit, so it has to hold the stream for
+    // the next instruction on top of what the current one is still
+    // consuming: keep MaxDegree <= DataBufDepth / 2.
+    parameter int  unsigned MaxDegree         = 16,
+    parameter bit           ClipWhenLarge     = 1'b1,
     // Dependent parameters. DO NOT CHANGE!
     localparam type         addr_t       = logic [AxiAddrWidth-1:0]
   ) (
@@ -133,7 +140,9 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .stride_t(stride_t),
     .addr_t  (addr_t  ),
     .size_t  (size_t  ),
-    .id_t    (id_t    )
+    .id_t    (id_t    ),
+    .MaxDegree    (MaxDegree    ),
+    .ClipWhenLarge(ClipWhenLarge)
   ) i_pf_predictor (
     .clk_i                 (clk_i               ),
     .rst_ni                (rst_ni              ),

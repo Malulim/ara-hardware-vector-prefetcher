@@ -54,3 +54,17 @@ CVA6+Ara model is still needed to confirm them.
 A prediction made before running this, that `vl = 1` would show a speedup
 because coverage is 100%, was wrong: the hit rate is 97% there but the time
 per instruction is set by how fast instructions are dispatched, not by `L`.
+
+## Step 1: predictor sends a stream (`step1_stream.*`)
+
+`pf_predictor` now offers up to `MaxDegree` (16) addresses per trusted
+prediction: the next instruction's elements, one after another. Buffer and
+FIFO depths are still 4.
+
+- **First non-1.00x results**, but only for `vl = 4`: up to 1.23x at `L = 12`.
+  Four prefetches fit in a 4-entry buffer.
+- **For `vl >= 8` hits drop to zero while prefetches go up** (about 500 to 1000
+  sent, 0 used at `L >= 7`). The buffer replaces entries round-robin, so a
+  stream longer than 4 overwrites its own first entries before the real
+  requests arrive. This is the capacity problem step 2 addresses.
+- The predictor still misses instructions that reuse an ID (unchanged).
