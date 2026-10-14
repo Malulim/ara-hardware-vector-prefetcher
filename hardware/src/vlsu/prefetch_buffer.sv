@@ -90,6 +90,16 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   logic rob_flush;
   assign rob_flush = 1'b0;
 
+  // Simulation-only kill switch for on/off comparisons: +pf_disable keeps
+  // every predictive AR off the bus. The real path (ROB, in-order release)
+  // is unchanged, so the comparison isolates the effect of prefetching.
+  logic pf_disable;
+`ifndef SYNTHESIS
+  initial pf_disable = $test$plusargs("pf_disable");
+`else
+  assign pf_disable = 1'b0;
+`endif
+
   // ---------------------------------------------------------------------
   // Classify + predict the next instruction's base address.
   // size_o/predicted_size_o/is_strided are forwarded end-to-end, never
@@ -225,7 +235,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .axi_ar_valid_i       (axi_ar_valid_i     ),
     .axi_ar_ready_o       (axi_ar_ready_o     ),
     .pred_ar_i            (pred_ar            ),
-    .pred_ar_valid_i      (predict_valid      ),
+    .pred_ar_valid_i      (predict_valid && !pf_disable),
     .pred_ar_ready_o      (predict_ready      ),
     .pred_ar_fire_o       (pred_addr_fifo_push),
     .pred_addr_fifo_full_i(pred_addr_fifo_full),
@@ -300,5 +310,83 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     .inval_len_i   (cva6_inval_len_i  ),
     .inval_size_i  (cva6_inval_size_i )
   );
+
+`ifndef SYNTHESIS
+  // ---------------------------------------------------------------------
+  // Simulation-only statistics. Read-only taps on signals above; nothing
+  // here drives any functional signal. Printed once at end of simulation
+  // when +pf_stats is given, as one "PF_STATS key=value ..." line.
+  // ---------------------------------------------------------------------
+  longint unsigned st_cycle;
+  longint unsigned st_real_ar, st_real_hit, st_real_miss;
+  longint unsigned st_pred_ar, st_fill, st_mispredict, st_new_insn;
+  // A real miss whose address has a predictive fetch still in flight: the
+  // case a third "in-flight" buffer state would turn into a wait.
+  longint unsigned st_dup;
+  longint unsigned st_max_outstanding;
+  // Real-path round trip, AR accepted -> its last R beat released.
+  longint unsigned st_lat_min, st_lat_sum, st_lat_cnt;
+  longint unsigned st_issue_q[$];
+
+  logic st_inflight_match;
+  always_comb begin
+    st_inflight_match = 1'b0;
+    for (int unsigned i = 0; i < PredAddrFifoDepth; i++) begin
+      if (i_pred_addr_fifo.valid_q[i] &&
+          i_pred_addr_fifo.entry_q[i].addr == addr_t'(axi_ar_i.addr) &&
+          i_pred_addr_fifo.entry_q[i].size == size_t'(axi_ar_i.size))
+        st_inflight_match = 1'b1;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      st_cycle           <= '0;
+      st_real_ar         <= '0;
+      st_real_hit        <= '0;
+      st_real_miss       <= '0;
+      st_pred_ar         <= '0;
+      st_fill            <= '0;
+      st_mispredict      <= '0;
+      st_new_insn        <= '0;
+      st_dup             <= '0;
+      st_max_outstanding <= '0;
+      st_lat_min         <= '1;
+      st_lat_sum         <= '0;
+      st_lat_cnt         <= '0;
+    end else begin
+      st_cycle <= st_cycle + 1;
+      if (i_pf_rob.ar_fire) begin
+        st_real_ar <= st_real_ar + 1;
+        if (i_pf_rob.is_hit) st_real_hit  <= st_real_hit + 1;
+        else                 st_real_miss <= st_real_miss + 1;
+        if (!i_pf_rob.is_hit && st_inflight_match) st_dup <= st_dup + 1;
+      end
+      if (pred_addr_fifo_push)      st_pred_ar    <= st_pred_ar + 1;
+      if (fill_valid)               st_fill       <= st_fill + 1;
+      if (mispredict)               st_mispredict <= st_mispredict + 1;
+      if (i_pf_predictor.new_insn)  st_new_insn   <= st_new_insn + 1;
+      if (i_pf_rob.count_q > st_max_outstanding) st_max_outstanding <= i_pf_rob.count_q;
+
+      if (i_pf_rob.real_ar_fire) st_issue_q.push_back(st_cycle);
+      if (i_pf_rob.real_r_fire && i_pf_rob.r_last_beat && st_issue_q.size() != 0) begin
+        automatic longint unsigned lat = st_cycle - st_issue_q.pop_front();
+        st_lat_sum <= st_lat_sum + lat;
+        st_lat_cnt <= st_lat_cnt + 1;
+        if (lat < st_lat_min) st_lat_min <= lat;
+      end
+    end
+  end
+
+  final begin
+    if ($test$plusargs("pf_stats")) begin
+      $display("PF_STATS real_ar=%0d hit=%0d miss=%0d pred_ar=%0d fill=%0d mispredict=%0d new_insn=%0d dup=%0d max_outstanding=%0d lat_min=%0d lat_avg_x10=%0d",
+               st_real_ar, st_real_hit, st_real_miss, st_pred_ar, st_fill, st_mispredict,
+               st_new_insn, st_dup, st_max_outstanding,
+               (st_lat_cnt != 0) ? st_lat_min : 0,
+               (st_lat_cnt != 0) ? (st_lat_sum * 10) / st_lat_cnt : 0);
+    end
+  end
+`endif
 
 endmodule : prefetch_buffer
