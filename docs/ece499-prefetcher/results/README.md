@@ -68,3 +68,37 @@ FIFO depths are still 4.
   stream longer than 4 overwrites its own first entries before the real
   requests arrive. This is the capacity problem step 2 addresses.
 - The predictor still misses instructions that reuse an ID (unchanged).
+
+## Step 2: capacity (`step2_capacity.*`)
+
+Data buffer 4 -> 32, predictive ARs in flight 4 -> 16, `MaxDegree` 16.
+
+Depths were chosen from seven combinations (geometric-mean speedup over the
+84 configurations):
+
+| buffer | in flight | MaxDegree | geomean | max | prefetches not used |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 4 | 16 | 1.005 | 1.23x | 93% |
+| 16 | 8 | 8 | 1.083 | 1.97x | 4% |
+| 32 | 8 | 16 | 1.123 | 2.12x | 3% |
+| **32** | **16** | **16** | **1.135** | **2.73x** | **3%** |
+| 32 | 32 | 16 | 1.135 | 2.73x | 3% |
+| 64 | 16 | 32 | 1.180 | 2.97x | 2% |
+| 64 | 32 | 32 | 1.180 | 2.97x | 2% |
+
+- **34 of 84 configurations are now faster, none is slower.** Largest: `vl =
+  16`, `L = 12`, 52 -> 19 cycles per instruction (2.73x).
+- **Where the gain comes from.** Real requests are capped at 4 outstanding by
+  `addrgen`'s queue, so the baseline costs `(L + 1) / 4` cycles per element.
+  Predictive ARs do not go through that queue: up to 16 can be outstanding.
+  With every element prefetched, an instruction takes `vl + 3` cycles
+  regardless of `L`. The speedup therefore grows with `L` and is 1.00x when
+  `L` is small enough that the queue never fills.
+- **`vl > MaxDegree` still gains, less.** At `vl = 32` half the elements are
+  covered (1.53x at `L = 12`); at `vl = 64` a quarter (1.21x). Buffer 64 /
+  MaxDegree 32 would lift these at twice the storage.
+- **Almost nothing is wasted.** 97% of prefetches are used.
+- **Instruction detection is now the main limit.** The predictor misses
+  instructions in 32 of 84 runs, more than before, because loads finish
+  sooner and their IDs are reused sooner. Most `gap = 40` runs are still
+  1.00x for this reason alone.

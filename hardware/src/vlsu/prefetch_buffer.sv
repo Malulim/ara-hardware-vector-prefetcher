@@ -29,10 +29,13 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
     // at once. Matches VaddrgenInsnQueueDepth (ara_pkg.sv) so this stage
     // does not reduce Ara's existing outstanding-request capacity.
     parameter int  unsigned RobDepth          = 4,
-    parameter int  unsigned DataBufDepth      = 4,
+    parameter int  unsigned DataBufDepth      = 32,
     // Depth of the side FIFO tracking addresses of outstanding predictive
     // ARs -- AXI's R channel never echoes back the request address.
-    parameter int  unsigned PredAddrFifoDepth = 4,
+    // Its occupancy is also the cap on predictive ARs in flight. Sized to
+    // MaxDegree so one instruction's whole stream can be outstanding at
+    // once; in the step-2 sweep 16 beat 8 and 32 added nothing.
+    parameter int  unsigned PredAddrFifoDepth = 16,
     // Largest number of predictive ARs issued per instruction (see
     // pf_predictor.sv). The data buffer replaces entries round-robin and
     // does not free an entry on a hit, so it has to hold the stream for
