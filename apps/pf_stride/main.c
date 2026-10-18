@@ -9,7 +9,6 @@
 // Self-checking: every lane's accumulated sum is compared with a scalar sum.
 
 #include <stdint.h>
-#include <string.h>
 
 #include "runtime.h"
 #include "util.h"
