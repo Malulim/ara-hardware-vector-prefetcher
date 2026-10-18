@@ -9,7 +9,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-make -C apps bin/pf_stride
+# The LLVM in install/ has no sysroot configured, so point it at the RISC-V
+# GCC install for libc headers. On ecetesla, install/riscv-llvm's ld.lld also
+# needs libxml2.so.2, which the OS no longer ships: set PF_LIB_COMPAT to a
+# directory holding a libxml2.so.2 symlink to the system libxml2.so.16.
+G="$PWD/install/riscv-gcc"
+if [ -n "${PF_LIB_COMPAT:-}" ]; then
+  export LD_LIBRARY_PATH="$PF_LIB_COMPAT${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+make -C apps bin/pf_stride \
+  LLVM_FLAGS="-march=rv64gcv_zfh_zvfh -mabi=lp64d -mno-relax -fuse-ld=lld --sysroot=$G/riscv64-unknown-elf --gcc-toolchain=$G"
 make -C hardware verilate
 
 SIM=hardware/build/verilator/Vara_tb_verilator
