@@ -126,3 +126,35 @@ The same full-system run also confirmed the model's main assumption: the
 real load round trip is 7 cycles and at most 4 real requests are
 outstanding, and each extra element costs about 2.2 cycles, close to the
 model's `(L + 1) / 4 = 2`.
+
+## Full system: CVA6 + Ara on Verilator (`full_system_*`)
+
+`apps/pf_stride` on the complete CVA6 + Ara + prefetcher model, built and run
+on ecetesla4 with `apps/pf_stride/run_full_system.sh`: 64 back-to-back
+`vlse64` loads per vector length, 64-byte stride, every lane checked against
+a scalar sum. Both runs end with `Core Test *** SUCCESS ***`.
+
+**Before the detection fix** (`full_system_20261018_1708`): on and off
+identical, `new_insn=1`, `pred_ar=0`. No prefetch was ever issued.
+
+**After the detection fix** (`full_system_20261018_1715`, commit `a2b4615a`):
+
+| vl | off (cycles) | on (cycles) | speedup |
+|---:|---:|---:|---:|
+| 4 | 1,437 | 1,192 | 1.21x |
+| 8 | 2,151 | 1,537 | 1.40x |
+| 16 | 3,369 | 2,198 | 1.53x |
+| 32 | 5,615 | 4,691 | 1.20x |
+
+- 256 loads, 256 detected (`new_insn = load_req_rise = 256`), 3 mispredicts
+  (where the vector length changes between runs).
+- 2,728 of 3,840 element reads hit the buffer (71%); 2,728 of 2,772
+  prefetches were used (98%).
+- `vl = 32` gains less because `MaxDegree` is 16: only half of each
+  instruction is prefetched.
+- Real round trip 7 cycles, at most 4 real requests outstanding, as in the
+  model's `L = 7` case.
+
+The model bench predicted 1.68x for `vl = 16, L = 7` with no gap between
+loads; the benchmark has a vector add and loop overhead between loads, so a
+somewhat lower full-system number is expected.
