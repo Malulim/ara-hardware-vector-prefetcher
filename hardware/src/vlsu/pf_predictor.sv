@@ -87,17 +87,25 @@ module pf_predictor import pf_pkg::*; #(
   // addrgen can hold pe_req_valid_i/pe_req_i stable across many cycles while
   // it works through one instruction's AR issuance (e.g. a unit-stride
   // burst split across a page boundary). "valid && prefetchable" alone
-  // would re-fire every one of those cycles. An instruction's id cannot be
-  // reused by the sequencer until the previous holder of that id has fully
-  // retired, so "id changed since the last prediction we fired" is a safe
-  // new-instruction edge detector that does not require duplicating
-  // addrgen's private vinsn_running_q state.
+  // would re-fire every one of those cycles, so a new instruction is
+  // detected as an edge, in either of two ways:
+  //   - the id changed since the last instruction we saw, or
+  //   - a load request appears after a cycle without one.
+  // The id alone is not enough: Ara's sequencer hands out the lowest free
+  // instruction id, so once a load has fully retired the next load usually
+  // gets the same id back. In the full CVA6 + Ara system that made every
+  // load after the first look like the same instruction (new_insn fired
+  // once in 240 loads). The second condition covers that case; an id can
+  // only be reused after its previous holder retired, by which point its
+  // request has long been withdrawn.
   id_t  last_id_q;
   logic last_id_valid_q;
+  logic load_req, load_req_q;
+  assign load_req = pe_req_valid_i && prefetchable_i;
 
   logic new_insn;
-  assign new_insn = pe_req_valid_i && prefetchable_i &&
-                     (!last_id_valid_q || (pe_req_i.id != last_id_q));
+  assign new_insn = load_req &&
+                     (!last_id_valid_q || !load_req_q || (pe_req_i.id != last_id_q));
 
   // Compute in a generously wide temporary so neither operand's native
   // width can silently truncate the product before the final cast down
@@ -174,6 +182,7 @@ module pf_predictor import pf_pkg::*; #(
     if (!rst_ni) begin
       last_id_q            <= '0;
       last_id_valid_q       <= 1'b0;
+      load_req_q            <= 1'b0;
       pending_addr_q        <= '0;
       pending_size_q        <= '0;
       pending_is_strided_q  <= 1'b0;
@@ -182,6 +191,7 @@ module pf_predictor import pf_pkg::*; #(
       stream_rem_q          <= '0;
       conf_q                <= PF_CONF_NO_PRED;
     end else begin
+      load_req_q <= load_req;
       // new_insn has priority over stream_fire. If both happen in the same
       // cycle the address on the output is still accepted by pf_rob (the
       // handshake completed), and the stream is then replaced.

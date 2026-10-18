@@ -102,3 +102,27 @@ Depths were chosen from seven combinations (geometric-mean speedup over the
   instructions in 32 of 84 runs, more than before, because loads finish
   sooner and their IDs are reused sooner. Most `gap = 40` runs are still
   1.00x for this reason alone.
+
+## Step 3: new-instruction detection (`step3_detect.*`)
+
+The first full-system run (CVA6 + Ara on ecetesla, `apps/pf_stride`) showed
+**no prefetch at all**: `new_insn=1` over 240 loads, `pred_ar=0`, identical
+cycles with prefetching on and off. Ara's sequencer gives each instruction
+the lowest free ID, so once a load retires the next load gets the same ID
+back, and an ID-change detector never fires.
+
+`pf_predictor` now also treats "a load request appears after a cycle without
+one" as a new instruction. A `load_req_rise` counter was added to
+`+pf_stats`, and `pf_predictor_tb` gained a reused-ID scenario (it fails with
+the old detector).
+
+In the model bench the predictor now notices all 64 instructions in all 84
+configurations (before: 32 runs missed some). Speedups are unchanged
+(geomean 1.136, 34/84 faster, max 2.73x): the configurations that were
+missing instructions have a long gap between loads, so time per instruction
+is set by dispatch, not by memory, and prefetching cannot shorten it.
+
+The same full-system run also confirmed the model's main assumption: the
+real load round trip is 7 cycles and at most 4 real requests are
+outstanding, and each extra element costs about 2.2 cycles, close to the
+model's `(L + 1) / 4 = 2`.

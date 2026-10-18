@@ -180,6 +180,18 @@ module pf_predictor_tb;
     insn(132, 4, 8, 8);
     expect_got("step6: non-strided instructions send nothing", '{});
 
+    // 8. Same id reused by the next load (what Ara's sequencer does once a
+    //    load has retired): it must still count as a new instruction, as
+    //    long as the request was withdrawn in between.
+    reset_dut();
+    insn(100, 4, 8, 4);
+    next_id = next_id - 3'd1;          // reuse the previous id
+    insn(132, 4, 8, 4);
+    next_id = next_id - 3'd1;          // and again
+    insn(164, 4, 8, 8);
+    expect_got("step8: a reused id after valid drops is still a new instruction",
+               '{164, 172, 180, 188, 196, 204, 212, 220});
+
     // 7. vl = 0: nothing to fetch.
     reset_dut();
     insn(100, 0, 8, 4);

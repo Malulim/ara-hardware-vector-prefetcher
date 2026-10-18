@@ -332,6 +332,8 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
   longint unsigned st_cycle;
   longint unsigned st_real_ar, st_real_hit, st_real_miss;
   longint unsigned st_pred_ar, st_fill, st_mispredict, st_new_insn;
+  // Load requests seen on pe_req (rising edges of valid && prefetchable).
+  longint unsigned st_load_req_rise;
   // A real miss whose address has a predictive fetch still in flight: the
   // case a third "in-flight" buffer state would turn into a wait.
   longint unsigned st_dup;
@@ -361,6 +363,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
       st_fill            <= '0;
       st_mispredict      <= '0;
       st_new_insn        <= '0;
+      st_load_req_rise   <= '0;
       st_dup             <= '0;
       st_max_outstanding <= '0;
       st_lat_min         <= '1;
@@ -378,6 +381,7 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
       if (fill_valid)               st_fill       <= st_fill + 1;
       if (mispredict)               st_mispredict <= st_mispredict + 1;
       if (i_pf_predictor.new_insn)  st_new_insn   <= st_new_insn + 1;
+      if (i_pf_predictor.load_req && !i_pf_predictor.load_req_q) st_load_req_rise <= st_load_req_rise + 1;
       if (i_pf_rob.count_q > st_max_outstanding) st_max_outstanding <= i_pf_rob.count_q;
 
       if (i_pf_rob.real_ar_fire) st_issue_q.push_back(st_cycle);
@@ -392,9 +396,9 @@ module prefetch_buffer import pf_pkg::*; import axi_pkg::*; #(
 
   final begin
     if ($test$plusargs("pf_stats")) begin
-      $display("PF_STATS real_ar=%0d hit=%0d miss=%0d pred_ar=%0d fill=%0d mispredict=%0d new_insn=%0d dup=%0d max_outstanding=%0d lat_min=%0d lat_avg_x10=%0d",
+      $display("PF_STATS real_ar=%0d hit=%0d miss=%0d pred_ar=%0d fill=%0d mispredict=%0d new_insn=%0d load_req_rise=%0d dup=%0d max_outstanding=%0d lat_min=%0d lat_avg_x10=%0d",
                st_real_ar, st_real_hit, st_real_miss, st_pred_ar, st_fill, st_mispredict,
-               st_new_insn, st_dup, st_max_outstanding,
+               st_new_insn, st_load_req_rise, st_dup, st_max_outstanding,
                (st_lat_cnt != 0) ? st_lat_min : 0,
                (st_lat_cnt != 0) ? (st_lat_sum * 10) / st_lat_cnt : 0);
     end
