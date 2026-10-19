@@ -59,7 +59,13 @@ module ara import ara_pkg::*; #(
     output acc_to_cva6_t      acc_resp_o,
     // AXI interface
     output axi_req_t          axi_req_o,
-    input  axi_resp_t         axi_resp_i
+    input  axi_resp_t         axi_resp_i,
+    // Coherency: CVA6's own AW stream, snooped pre-mux in ara_system.sv --
+    // see prefetch_buffer.sv's header comment.
+    input  logic               cva6_inval_valid_i,
+    input  logic [AxiAddrWidth-1:0] cva6_inval_addr_i,
+    input  axi_pkg::len_t      cva6_inval_len_i,
+    input  axi_pkg::size_t     cva6_inval_size_i
   );
 
   `include "common_cells/registers.svh"
@@ -516,6 +522,11 @@ module ara import ara_pkg::*; #(
     // AXI memory interface
     .axi_req_o                  (axi_req_o                                             ),
     .axi_resp_i                 (axi_resp_i                                            ),
+    // Coherency: see this module's own port comment.
+    .cva6_inval_valid_i            (cva6_inval_valid_i                                       ),
+    .cva6_inval_addr_i             (cva6_inval_addr_i                                        ),
+    .cva6_inval_len_i              (cva6_inval_len_i                                         ),
+    .cva6_inval_size_i             (cva6_inval_size_i                                        ),
     // Interface with the dispatcher
     .core_st_pending_i          (core_st_pending                                       ),
     .load_complete_o            (load_complete                                         ),

@@ -1,3 +1,15 @@
+# OS / editor junk -- never useful to anyone else, so catch it everywhere
+# rather than one path at a time.
+.DS_Store
+.slang/
+*.swp
+*.bak
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+.venv/
+
 work-dpi/
 dw*
 site/*
@@ -14,7 +26,6 @@ wlft*
 src/moore.sv
 *.sig
 *.dtb
-*.dasm
 obj_dir/*
 /tmp*
 *.dasm
@@ -23,7 +34,7 @@ obj_dir/*
 build/
 trace_*
 mems
-*log
+*.log
 uart
 .bender
 .dvt
@@ -34,4 +45,4 @@ install
 pyenv_ara/
 docs/build/
 docs/source/_templates/
-apps/_*
+hardware/filelist_slang.f

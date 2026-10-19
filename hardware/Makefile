@@ -44,6 +44,8 @@ library        ?= work
 dpi_library    ?= work-dpi
 # verilator library
 veril_library  ?= $(buildpath)/verilator
+# verilator library for unit-level TBs (kept separate from system TB)
+veril_unit_library ?= $(buildpath)/verilator-unit
 # verilator path
 veril_path     ?= $(abspath $(INSTALL_DIR)/verilator/bin)
 # verilator top-level
@@ -113,6 +115,7 @@ bender_common_targs := -t rtl -t cv64a6_imafdcv_sv39 -t tech_cells_generic_inclu
 bender_targs_simc     := $(bender_common_targs) -t ara_test -t cva6_test
 bender_targs_veril    := $(bender_common_targs) -t ara_test -t cva6_test -t verilator  -t tech_cells_generic_exclude_deprecated
 bender_targs_spyglass := $(bender_common_targs) -t spyglass
+bender_targs_unit_veril := $(bender_common_targs) -t unit_test -t verilator -t tech_cells_generic_exclude_deprecated
 
 # Default target
 all: compile
@@ -227,13 +230,55 @@ $(veril_library)/V$(veril_top): $(config_file) Makefile ../Bender.yml $(shell fi
   --top-module $(veril_top) &&                                                  \
 	cd $(veril_library) && OBJCACHE='' make -j4 -f V$(veril_top).mk
 
+# Unit-level Verilator
+.PHONY: verilate_unit
+verilate_unit: $(buildpath) bender $(veril_unit_library)/V$(veril_unit_top)
+
+$(veril_unit_library)/V$(veril_unit_top): $(config_file) Makefile ../Bender.yml $(shell find src -type f) $(shell find ../config -type f) $(shell find include -type f) $(shell find tb -type f) $(shell find deps -type f)
+	rm -rf $(veril_unit_library); mkdir -p $(veril_unit_library)
+	$(BENDER) script flist-plus $(bender_targs_unit_veril) $(bender_defs_veril) > $(veril_unit_library)/bender_script_$(config)
+	$(veril_path)/verilator -f $(veril_unit_library)/bender_script_$(config)           \
+  -O3                                                                                 \
+  --timing                                                                            \
+  $(if $(trace),,--hierarchical) \
+  -Wno-fatal                                                                          \
+  -Wno-PINCONNECTEMPTY                                                                \
+  -Wno-BLKANDNBLK                                                                     \
+  -Wno-CASEINCOMPLETE                                                                 \
+  -Wno-CMPCONST                                                                       \
+  -Wno-LATCH                                                                          \
+  -Wno-LITENDIAN                                                                      \
+  -Wno-UNOPTFLAT                                                                      \
+  -Wno-UNPACKED                                                                       \
+  -Wno-UNSIGNED                                                                       \
+  -Wno-WIDTH                                                                          \
+  -Wno-WIDTHCONCAT                                                                    \
+  -Wno-ENUMVALUE                                                                      \
+  -Wno-COMBDLY                                                                        \
+  --Mdir $(veril_unit_library)                                                        \
+  --compiler clang                                                                    \
+  -CFLAGS -DTOP_HEADER='\"V$(veril_unit_top).h\"'                                     \
+  -CFLAGS -DTOP_CLASS=V$(veril_unit_top)                                              \
+ $(CLANG_CXXFLAGS)                                                                   \
+  $(CLANG_LDFLAGS)                                                                    \
+  $(if $(trace),--trace -CFLAGS -DTRACE_VCD,)                                         \
+  --exe $(ROOT_DIR)/tb/verilator/unit_harness.cpp                                     \
+  --cc                                                                               \
+  --top-module $(veril_unit_top) &&                                                   \
+	cd $(veril_unit_library) && OBJCACHE='' make -j4 -f V$(veril_unit_top).mk
+
+# Unit-level simulation (no ELF preload)
+.PHONY: simv_unit
+simv_unit: verilate_unit
+	$(veril_unit_library)/V$(veril_unit_top)
+
 # Simulation
 .PHONY: simv
-simv:
+simv: verilate
 	$(veril_library)/V$(veril_top) $(if $(trace),-t,) -l ram,$(app_path)/$(app),elf
 
 .PHONY: riscv_tests_simv
-riscv_tests_simv: $(tests)
+riscv_tests_simv: verilate $(tests)
 
 $(tests): rv%: $(app_path)/rv%
 	$(veril_library)/V$(veril_top) $(if $(trace),-t,) -l ram,$<,elf &> $(buildpath)/$@.trace
@@ -266,3 +311,5 @@ $(buildpath)/$(dpi_library)/ara_dpi.so: $(dpi)
 clean:
 	rm -rf $(buildpath)
 	rm -f  $(BENDER)
+# Unit-level top-level to compile/run with Verilator (no ELF preload by default)
+veril_unit_top ?= unit_smoke_tb

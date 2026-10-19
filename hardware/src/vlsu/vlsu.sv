@@ -37,6 +37,13 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
     // AXI Memory Interface
     output axi_req_t                axi_req_o,
     input  axi_resp_t               axi_resp_i,
+    // Coherency: CVA6's own AW stream, snooped pre-mux -- see
+    // prefetch_buffer.sv's header comment for why the prefetcher needs
+    // this on top of Ara's own axi_inval_filter.sv coverage.
+    input  logic                    cva6_inval_valid_i,
+    input  logic      [AxiAddrWidth-1:0] cva6_inval_addr_i,
+    input  axi_pkg::len_t           cva6_inval_len_i,
+    input  axi_pkg::size_t          cva6_inval_size_i,
     // Interface with the dispatcher
     input  logic                    core_st_pending_i,
     output logic                    load_complete_o,
@@ -152,6 +159,16 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
   logic             ldu_axi_addrgen_req_ready;
   logic             stu_axi_addrgen_req_ready;
 
+  // AR: addrgen -> prefetch_buffer
+  axi_ar_t pf_axi_ar;
+  logic    pf_axi_ar_valid;
+  logic    pf_axi_ar_ready;
+
+  // R: prefetch_buffer -> vldu
+  axi_r_t pf_axi_r;
+  logic   pf_axi_r_valid;
+  logic   pf_axi_r_ready;
+
   addrgen #(
     .NrLanes     (NrLanes     ),
     .VLEN        (VLEN        ),
@@ -170,9 +187,9 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
     .axi_aw_o                   (axi_req.aw                 ),
     .axi_aw_valid_o             (axi_req.aw_valid           ),
     .axi_aw_ready_i             (axi_resp.aw_ready          ),
-    .axi_ar_o                   (axi_req.ar                 ),
-    .axi_ar_valid_o             (axi_req.ar_valid           ),
-    .axi_ar_ready_i             (axi_resp.ar_ready          ),
+    .axi_ar_o                   (pf_axi_ar                  ),
+    .axi_ar_valid_o             (pf_axi_ar_valid            ),
+    .axi_ar_ready_i             (pf_axi_ar_ready            ),
     // Interface with dispatcher
     .core_st_pending_i          (core_st_pending_i          ),
     // Interface with the sequencer
@@ -209,6 +226,52 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
     .mmu_exception_i
   );
 
+  //////////////////////
+  //  Prefetch Buffer  //
+  //////////////////////
+
+  // Sits on the AR/R load path, between addrgen and the AXI cut. Does not
+  // touch AW/W/B (store path bypasses it entirely).
+  prefetch_buffer #(
+    .AxiAddrWidth(AxiAddrWidth      ),
+    .AxiDataWidth(AxiDataWidth      ),
+    .axi_ar_t    (axi_ar_t          ),
+    .axi_r_t     (axi_r_t           ),
+    .pe_req_t    (pe_req_t          ),
+    .stride_t    (elen_t            ),
+    .size_t      (axi_pkg::size_t   ),
+    .id_t        (vid_t             )
+  ) i_prefetch_buffer (
+    .clk_i         (clk_i            ),
+    .rst_ni        (rst_ni           ),
+    // Instruction stream: stride/EEW/vl live only here, not on the AXI
+    // channels below (same reason addrgen's own metadata FIFO carries
+    // neither).
+    .pe_req_i      (pe_req_i         ),
+    .pe_req_valid_i(pe_req_valid_i   ),
+    // AR: from addrgen
+    .axi_ar_i      (pf_axi_ar        ),
+    .axi_ar_valid_i(pf_axi_ar_valid  ),
+    .axi_ar_ready_o(pf_axi_ar_ready  ),
+    // AR: to the AXI cut
+    .axi_ar_o      (axi_req.ar       ),
+    .axi_ar_valid_o(axi_req.ar_valid ),
+    .axi_ar_ready_i(axi_resp.ar_ready),
+    // R: from the AXI cut
+    .axi_r_i       (axi_resp.r       ),
+    .axi_r_valid_i (axi_resp.r_valid ),
+    .axi_r_ready_o (axi_req.r_ready  ),
+    // R: to vldu
+    .axi_r_o       (pf_axi_r         ),
+    .axi_r_valid_o (pf_axi_r_valid   ),
+    .axi_r_ready_i (pf_axi_r_ready   ),
+    // Coherency: see this module's own port comment.
+    .cva6_inval_valid_i(cva6_inval_valid_i ),
+    .cva6_inval_addr_i (cva6_inval_addr_i  ),
+    .cva6_inval_len_i  (cva6_inval_len_i   ),
+    .cva6_inval_size_i (cva6_inval_size_i  )
+  );
+
   ////////////////////////
   //  Vector Load Unit  //
   ////////////////////////
@@ -226,9 +289,9 @@ module vlsu import ara_pkg::*; import rvv_pkg::*; #(
     .clk_i                  (clk_i                     ),
     .rst_ni                 (rst_ni                    ),
     // AXI Memory Interface
-    .axi_r_i                (axi_resp.r                ),
-    .axi_r_valid_i          (axi_resp.r_valid          ),
-    .axi_r_ready_o          (axi_req.r_ready           ),
+    .axi_r_i                (pf_axi_r                  ),
+    .axi_r_valid_i          (pf_axi_r_valid            ),
+    .axi_r_ready_o          (pf_axi_r_ready            ),
     // Interface with the dispatcher
     .load_complete_o        (load_complete             ),
     // Interface with the main sequencer

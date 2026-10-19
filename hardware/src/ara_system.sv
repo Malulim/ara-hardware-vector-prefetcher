@@ -192,6 +192,23 @@ module ara_system import axi_pkg::*; import ara_pkg::*; #(
     .mst_resp_i(ariane_axi_resp       )
   );
 
+  // Coherency, reverse direction of axi_inval_filter.sv below: snoop
+  // CVA6's own AW here (post-DW-converter, pre-mux -- mirrors exactly
+  // where axi_inval_filter taps ARA's own AW) and feed the fired beat's
+  // address/len/size into Ara's prefetcher so it can invalidate/poison any
+  // matching entry. One pulse per accepted AW (fire = valid && ready, the
+  // interconnect side of the handshake, not the eventual B response) --
+  // see prefetch_buffer.sv's header comment for why Ara needs this on top
+  // of the existing ARA->CVA6 direction.
+  logic                    cva6_inval_valid;
+  logic [AxiAddrWidth-1:0] cva6_inval_addr;
+  axi_pkg::len_t           cva6_inval_len;
+  axi_pkg::size_t          cva6_inval_size;
+  assign cva6_inval_valid = ariane_axi_req.aw_valid && ariane_axi_resp.aw_ready;
+  assign cva6_inval_addr  = ariane_axi_req.aw.addr;
+  assign cva6_inval_len   = ariane_axi_req.aw.len;
+  assign cva6_inval_size  = ariane_axi_req.aw.size;
+
   axi_inval_filter #(
     .MaxTxns    (4                              ),
     .AddrWidth  (AxiAddrWidth                   ),
@@ -254,7 +271,11 @@ module ara_system import axi_pkg::*; import ara_pkg::*; #(
     .acc_req_i       (acc_req       ),
     .acc_resp_o      (acc_resp      ),
     .axi_req_o       (ara_axi_req   ),
-    .axi_resp_i      (ara_axi_resp  )
+    .axi_resp_i      (ara_axi_resp  ),
+    .cva6_inval_valid_i (cva6_inval_valid ),
+    .cva6_inval_addr_i  (cva6_inval_addr  ),
+    .cva6_inval_len_i   (cva6_inval_len   ),
+    .cva6_inval_size_i  (cva6_inval_size  )
   );
 
   axi_mux #(
